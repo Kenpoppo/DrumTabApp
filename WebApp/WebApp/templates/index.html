@@ -3,71 +3,351 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>🎸 Sonic Blue Tab Generator</title>
+    <title>Sonic Blue Tab Generator</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <style>
+        :root {
+            --primary-color: #4285f4;
+            --secondary-color: #a8c7ff;
+            --success-color: #7ac142;
+            --purple-color: #b388ff;
+            --background-color: #f0f6ff;
+        }
+
         body {
             padding: 20px;
-            background-color: #f8f9fa;
+            background-color: var(--background-color);
+            background-image: 
+                radial-gradient(circle at 10% 20%, rgba(66, 133, 244, 0.1) 0%, transparent 20%),
+                radial-gradient(circle at 90% 80%, rgba(168, 199, 255, 0.1) 0%, transparent 20%);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
         }
-        .container {
+
+        .app-container {
             max-width: 800px;
+            margin: 0 auto;
+            text-align: center;
+            padding: 2rem;
+        }
+
+        .logo {
+            width: 100px;
+            height: 100px;
+            background-color: var(--primary-color);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 1rem;
+            position: relative;
+            overflow: visible;
+            box-shadow: 0 4px 12px rgba(66, 133, 244, 0.2);
+        }
+
+        .logo::before,
+        .logo::after {
+            content: '';
+            position: absolute;
+            background-color: var(--primary-color);
+            border-radius: 50px;
+            width: 30px;
+            height: 60px;
+            top: -20px;
+            box-shadow: 0 4px 12px rgba(66, 133, 244, 0.2);
+        }
+
+        .logo::before {
+            left: 20px;
+            transform: rotate(-10deg);
+        }
+
+        .logo::after {
+            right: 20px;
+            transform: rotate(10deg);
+        }
+
+        .logo svg {
+            width: 40px;
+            height: 40px;
+            fill: white;
+            position: relative;
+            z-index: 1;
+        }
+
+        .title {
+            color: var(--primary-color);
+            font-size: 2.5rem;
+            font-weight: bold;
+            margin-bottom: 0.5rem;
+        }
+
+        .subtitle {
+            color: #666;
+            margin-bottom: 3rem;
+        }
+
+        .upload-container {
             background-color: white;
-            padding: 30px;
-            border-radius: 10px;
-            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+            border: 2px dashed var(--secondary-color);
+            border-radius: 1rem;
+            padding: 3rem;
+            margin-bottom: 2rem;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            position: relative;
         }
-        .btn {
-            margin: 5px;
+
+        .upload-container:hover {
+            border-color: var(--primary-color);
+            background-color: var(--background-color);
         }
+
+        .upload-container::after {
+            content: '🐰';
+            position: absolute;
+            bottom: -15px;
+            right: -15px;
+            font-size: 2rem;
+            transform: rotate(15deg);
+        }
+
+        .upload-icon {
+            width: 48px;
+            height: 48px;
+            margin-bottom: 1rem;
+            color: #adb5bd;
+        }
+
+        .file-types {
+            color: #6c757d;
+            font-size: 0.9rem;
+            margin-top: 0.5rem;
+        }
+
+        .btn-group {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 1rem;
+            justify-content: center;
+            margin-bottom: 2rem;
+        }
+
+        .btn-action {
+            padding: 0.75rem 1.5rem;
+            border-radius: 2rem;
+            font-weight: 500;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            transition: all 0.3s ease;
+            border: none;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .btn-guitar {
+            background-color: var(--primary-color);
+            color: white;
+        }
+
+        .btn-bass {
+            background-color: var(--secondary-color);
+            color: var(--primary-color);
+        }
+
+        .btn-drum {
+            background-color: var(--purple-color);
+            color: white;
+        }
+
+        .btn-export {
+            background-color: var(--success-color);
+            color: white;
+        }
+
+        .btn-action:hover {
+            transform: translateY(-2px) scale(1.05);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        }
+
+        .btn-action::after {
+            content: '🐰';
+            position: absolute;
+            right: -20px;
+            bottom: -20px;
+            font-size: 1.5rem;
+            opacity: 0.1;
+            transform: rotate(15deg);
+        }
+
         #tabDisplay {
-            min-height: 200px;
-            margin-top: 20px;
-            padding: 15px;
-            border: 1px solid #dee2e6;
-            border-radius: 5px;
-            white-space: pre-wrap;
+            background-color: white;
+            padding: 2rem;
+            border-radius: 1rem;
+            box-shadow: 0 4px 12px rgba(66, 133, 244, 0.1);
+            margin-top: 2rem;
+            text-align: left;
             font-family: monospace;
+            white-space: pre-wrap;
+            display: none;
+            border: 2px solid var(--secondary-color);
+            position: relative;
         }
+
+        #tabDisplay::before {
+            content: '🎵';
+            position: absolute;
+            top: -15px;
+            left: 20px;
+            font-size: 1.5rem;
+            background-color: white;
+            padding: 0 10px;
+        }
+
         .loading {
             display: none;
-            text-align: center;
-            margin: 20px 0;
+        }
+
+        .loading .spinner-border {
+            width: 3rem;
+            height: 3rem;
+            color: var(--primary-color);
+        }
+
+        .footer {
+            margin-top: 4rem;
+            color: var(--primary-color);
+            font-size: 0.9rem;
+            position: relative;
+            padding-bottom: 40px;
+        }
+
+        .footer::after {
+            content: '🐰';
+            position: absolute;
+            bottom: 0;
+            left: 50%;
+            transform: translateX(-50%);
+            font-size: 1.5rem;
+            opacity: 0.8;
+        }
+
+        #audioFile {
+            display: none;
         }
     </style>
 </head>
 <body>
-    <div class="container">
-        <h1 class="text-center mb-4">🎸 Sonic Blue Tab Generator</h1>
-        
-        <div class="mb-3">
-            <input type="file" class="form-control" id="audioFile" accept=".mp3,.wav,.flac">
+    <div class="app-container">
+        <!-- ロゴ -->
+        <div class="logo">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+                <path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"/>
+            </svg>
         </div>
 
-        <div class="d-flex justify-content-center flex-wrap">
-            <button class="btn btn-primary" onclick="generateTab('guitar')">🎸 ギターTAB生成</button>
-            <button class="btn btn-primary" onclick="generateTab('bass')">🪕 ベースTAB生成</button>
-            <button class="btn btn-primary" onclick="generateTab('drum')">🥁 ドラム譜生成</button>
-            <button class="btn btn-success" onclick="exportPDF()">💾 エクスポート (PDF)</button>
+        <!-- タイトル -->
+        <h1 class="title">Sonic Blue Tab Generator</h1>
+        <p class="subtitle">音源から自動でTAB譜を生成するツール</p>
+
+        <!-- アップロードエリア -->
+        <div class="upload-container" onclick="document.getElementById('audioFile').click()">
+            <svg class="upload-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+                <path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/>
+            </svg>
+            <p>ここに音楽ファイルをドラッグ＆ドロップ</p>
+            <p class="file-types">対応形式: MP3, WAV, FLAC</p>
+            <input type="file" id="audioFile" accept=".mp3,.wav,.flac" style="display: none;">
         </div>
 
+        <!-- ボタングループ -->
+        <div class="btn-group">
+            <button class="btn-action btn-guitar" onclick="generateTab('guitar')">
+                🎸 ギターTAB生成
+            </button>
+            <button class="btn-action btn-bass" onclick="generateTab('bass')">
+                🪕 ベースTAB生成
+            </button>
+            <button class="btn-action btn-drum" onclick="generateTab('drum')">
+                🥁 ドラム譜生成
+            </button>
+            <button class="btn-action btn-export" onclick="exportPDF()">
+                💾 エクスポート (PDF)
+            </button>
+        </div>
+
+        <!-- ローディング -->
         <div class="loading" id="loading">
-            <div class="spinner-border text-primary" role="status">
+            <div class="spinner-border" role="status">
                 <span class="visually-hidden">Loading...</span>
             </div>
             <p>処理中...</p>
         </div>
 
+        <!-- TAB表示エリア -->
         <div id="tabDisplay"></div>
+
+        <!-- フッター -->
+        <div class="footer">
+            © 2025 浦和うさぎスタジオ. All rights reserved.
+        </div>
     </div>
 
     <script>
         let currentFilePath = null;
 
+        // ドラッグ&ドロップの処理
+        const uploadContainer = document.querySelector('.upload-container');
+        
+        ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+            uploadContainer.addEventListener(eventName, preventDefaults, false);
+        });
+
+        function preventDefaults (e) {
+            e.preventDefault();
+            e.stopPropagation();
+        }
+
+        ['dragenter', 'dragover'].forEach(eventName => {
+            uploadContainer.addEventListener(eventName, highlight, false);
+        });
+
+        ['dragleave', 'drop'].forEach(eventName => {
+            uploadContainer.addEventListener(eventName, unhighlight, false);
+        });
+
+        function highlight(e) {
+            uploadContainer.classList.add('border-primary');
+        }
+
+        function unhighlight(e) {
+            uploadContainer.classList.remove('border-primary');
+        }
+
+        uploadContainer.addEventListener('drop', handleDrop, false);
+
+        function handleDrop(e) {
+            const dt = e.dataTransfer;
+            const files = dt.files;
+            handleFiles(files);
+        }
+
+        function handleFiles(files) {
+            if (files.length > 0) {
+                const file = files[0];
+                uploadFile(file);
+            }
+        }
+
+        // ファイルアップロード処理
         document.getElementById('audioFile').addEventListener('change', async (e) => {
             const file = e.target.files[0];
-            if (!file) return;
+            if (file) {
+                uploadFile(file);
+            }
+        });
 
+        async function uploadFile(file) {
             const formData = new FormData();
             formData.append('file', file);
 
@@ -80,6 +360,7 @@
                 const data = await response.json();
                 if (response.ok) {
                     currentFilePath = data.file_path;
+                    document.getElementById('tabDisplay').style.display = 'block';
                     document.getElementById('tabDisplay').textContent = `📂 選択されたファイル: ${file.name}`;
                 } else {
                     alert(data.error);
@@ -88,7 +369,7 @@
                 alert('ファイルのアップロードに失敗しました');
             }
             document.getElementById('loading').style.display = 'none';
-        });
+        }
 
         async function generateTab(type) {
             if (!currentFilePath) {
@@ -110,6 +391,7 @@
                 });
                 const data = await response.json();
                 if (response.ok) {
+                    document.getElementById('tabDisplay').style.display = 'block';
                     document.getElementById('tabDisplay').textContent = data.result;
                 } else {
                     alert(data.error);

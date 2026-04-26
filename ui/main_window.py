@@ -17,19 +17,32 @@ from __future__ import annotations
 import os
 from typing import Callable, Optional
 
-from PyQt5.QtCore import QThread, pyqtSignal
+from PyQt5.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtWidgets import (
     QCheckBox,
     QFileDialog,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QMainWindow,
     QPushButton,
+    QSlider,
+    QSpinBox,
     QStatusBar,
     QTextEdit,
     QVBoxLayout,
     QWidget,
 )
+
+from core.player import AudioPlayer, make_click_sound as _make_click
+
+_SR_CLICK = 22050   # クリック音のサンプルレート
+
+
+def _fmt_time(sec: float) -> str:
+    """秒を m:ss 形式に変換する。"""
+    s = max(0, int(sec))
+    return f"{s // 60}:{s % 60:02d}"
 
 # プロジェクトルート基準のデフォルトディレクトリ
 _ROOT_DIR     = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -61,16 +74,32 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._selected_file: str | None = None
         self._worker: _Worker | None = None
-        # 解析結果を保持（MIDI 書き出しに利用）
+        # 解析結果を保持
         self._last_drum_result   = None
         self._last_bass_result   = None
         self._last_guitar_result = None
+
+        # ── プレイヤー ──────────────────────────────────────────────────────────
+        self._player      = AudioPlayer()
+        self._click_snd   = _make_click(_SR_CLICK)
+        self._pos_timer   = QTimer(self)
+        self._metro_timer = QTimer(self)
+        self._prog_seeking = False
+        self._loop_a_sec: Optional[float] = None
+        self._loop_b_sec: Optional[float] = None
+        self._was_playing  = False
+
+        self._pos_timer.setInterval(100)          # 100ms ごとに位置更新
+        self._pos_timer.timeout.connect(self._update_pos)
+        self._pos_timer.start()
+        self._metro_timer.timeout.connect(self._metro_tick)
+
         self._setup_ui()
 
     # ── UI 構築 ─────────────────────────────────────────────────────────────────
     def _setup_ui(self) -> None:
         self.setWindowTitle("Sonic Blue Tab Generator")
-        self.setGeometry(200, 200, 960, 700)
+        self.setGeometry(200, 200, 960, 820)
 
         # ファイル選択
         self._file_btn   = QPushButton("音源ファイルを選択")
@@ -120,6 +149,7 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout()
         layout.addLayout(file_row)
         layout.addLayout(btn_row)
+        layout.addWidget(self._build_player_panel())
         layout.addWidget(self._display)
 
         container = QWidget()
@@ -148,6 +178,14 @@ class MainWindow(QMainWindow):
             self._file_label.setStyleSheet("color: black; padding-left: 6px;")
             self._set_analysis_enabled(True)
             self.statusBar().showMessage(f"選択: {os.path.basename(path)}")
+            # プレイヤーに音声をロード
+            self._player.stop()
+            self._play_btn.setText("▶")
+            self._loop_a_sec = self._loop_b_sec = None
+            self._player.clear_loop()
+            self._loop_a_btn.setText("[ A 点 セット ]")
+            self._loop_b_btn.setText("[ B 点 セット ]")
+            self._load_audio()
 
     # ── 解析ランチャー ──────────────────────────────────────────────────────────
     def _run_guitar(self) -> None:
@@ -241,6 +279,12 @@ class MainWindow(QMainWindow):
         if any([self._last_drum_result, self._last_bass_result, self._last_guitar_result]):
             self._midi_btn.setEnabled(True)
             self._gp_btn.setEnabled(True)
+        # BPM をメトロノームに反映
+        bpm = self._get_bpm()
+        if bpm:
+            self._metro_bpm_lbl.setText(f"BPM: {bpm:.0f}")
+            if self._metro_timer.isActive():
+                self._metro_timer.setInterval(int(60000 / bpm))
         self.statusBar().showMessage("完了")
 
     def _on_error(self, message: str) -> None:
@@ -353,3 +397,270 @@ class MainWindow(QMainWindow):
         if not enabled:
             self._midi_btn.setEnabled(False)
             self._gp_btn.setEnabled(False)
+
+    # ── プレイヤーパネル構築 ────────────────────────────────────────────────────
+
+    def _build_player_panel(self) -> QGroupBox:
+        group = QGroupBox("🎵 プレイヤー  ( 速度変更 / 音程変更 / A-B ループ / メトロノーム )")
+
+        # Row1: 再生コントロール + プログレスバー
+        self._play_btn    = QPushButton("▶")
+        self._stop_btn    = QPushButton("⏹")
+        self._prog_slider = QSlider(Qt.Horizontal)
+        self._prog_slider.setRange(0, 10000)
+        self._time_lbl    = QLabel("0:00 / 0:00")
+
+        self._play_btn.setFixedWidth(36)
+        self._stop_btn.setFixedWidth(36)
+        self._time_lbl.setFixedWidth(90)
+        self._time_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+        self._play_btn.clicked.connect(self._toggle_play)
+        self._stop_btn.clicked.connect(self._stop_playback)
+        self._prog_slider.sliderPressed.connect(self._on_prog_press)
+        self._prog_slider.sliderReleased.connect(self._on_prog_release)
+
+        ctrl_row = QHBoxLayout()
+        ctrl_row.addWidget(self._play_btn)
+        ctrl_row.addWidget(self._stop_btn)
+        ctrl_row.addWidget(self._prog_slider, stretch=1)
+        ctrl_row.addWidget(self._time_lbl)
+
+        # Row2: 速度・音程スライダー
+        self._speed_slider = QSlider(Qt.Horizontal)
+        self._speed_slider.setRange(25, 200)   # 0.25x ~ 2.0x (×100)
+        self._speed_slider.setValue(100)
+        self._speed_slider.setToolTip("再生速度: 0.25x ~ 2.0x（スライダーを離すと適用、librosa time_stretch）")
+        self._speed_lbl = QLabel("1.00x")
+        self._speed_lbl.setFixedWidth(42)
+
+        self._pitch_slider = QSlider(Qt.Horizontal)
+        self._pitch_slider.setRange(-12, 12)
+        self._pitch_slider.setValue(0)
+        self._pitch_slider.setToolTip("音程: -12 ~ +12 半音（スライダーを離すと適用、librosa pitch_shift）")
+        self._pitch_lbl = QLabel("±0")
+        self._pitch_lbl.setFixedWidth(32)
+
+        self._speed_slider.valueChanged.connect(
+            lambda v: self._speed_lbl.setText(f"{v / 100:.2f}x"))
+        self._speed_slider.sliderReleased.connect(self._on_speed_released)
+        self._pitch_slider.valueChanged.connect(
+            lambda v: self._pitch_lbl.setText(
+                f"+{v}" if v > 0 else ("±0" if v == 0 else str(v))))
+        self._pitch_slider.sliderReleased.connect(self._on_pitch_released)
+
+        fx_row = QHBoxLayout()
+        fx_row.addWidget(QLabel("速度:"))
+        fx_row.addWidget(self._speed_slider, stretch=1)
+        fx_row.addWidget(self._speed_lbl)
+        fx_row.addWidget(QLabel("   音程 (半音):"))
+        fx_row.addWidget(self._pitch_slider, stretch=1)
+        fx_row.addWidget(self._pitch_lbl)
+
+        # Row3: A-B ループ + メトロノーム
+        self._loop_a_btn   = QPushButton("[ A 点 セット ]")
+        self._loop_b_btn   = QPushButton("[ B 点 セット ]")
+        self._loop_clr_btn = QPushButton("ループ解除")
+        self._metro_btn    = QPushButton("🥁 メトロノーム")
+        self._metro_btn.setCheckable(True)
+        self._metro_bpm_lbl = QLabel("BPM: -")
+
+        self._loop_a_btn.clicked.connect(self._set_loop_a)
+        self._loop_b_btn.clicked.connect(self._set_loop_b)
+        self._loop_clr_btn.clicked.connect(self._clear_loop)
+        self._metro_btn.toggled.connect(self._toggle_metro)
+
+        loop_row = QHBoxLayout()
+        loop_row.addWidget(self._loop_a_btn)
+        loop_row.addWidget(self._loop_b_btn)
+        loop_row.addWidget(self._loop_clr_btn)
+        loop_row.addStretch()
+        loop_row.addWidget(self._metro_btn)
+        loop_row.addWidget(self._metro_bpm_lbl)
+
+        vbox = QVBoxLayout()
+        vbox.addLayout(ctrl_row)
+        vbox.addLayout(fx_row)
+        vbox.addLayout(loop_row)
+        group.setLayout(vbox)
+
+        # 初期状態: ファイルロード後に有効化
+        for w in (self._play_btn, self._stop_btn, self._prog_slider,
+                  self._speed_slider, self._pitch_slider,
+                  self._loop_a_btn, self._loop_b_btn, self._loop_clr_btn,
+                  self._metro_btn):
+            w.setEnabled(False)
+
+        return group
+
+    # ── プレイヤー: 読み込み ────────────────────────────────────────────────────
+
+    def _load_audio(self) -> None:
+        """選択中ファイルをプレイヤーにバックグラウンドロードする。"""
+        path = self._selected_file
+        if not path:
+            return
+        self._set_player_enabled(False)
+        self.statusBar().showMessage("音声ファイルを読み込み中...")
+
+        def _task() -> str:
+            self._player.load(path)
+            return str(self._player.duration_sec)
+
+        w = _Worker(_task)
+        w.finished.connect(self._on_audio_loaded)
+        w.error.connect(lambda msg: self.statusBar().showMessage(f"読み込みエラー: {msg}"))
+        w.start()
+
+    def _on_audio_loaded(self, dur_str: str) -> None:
+        dur = float(dur_str)
+        self._set_player_enabled(True)
+        self._play_btn.setText("▶")
+        self._time_lbl.setText(f"0:00 / {_fmt_time(dur)}")
+        bpm = self._get_bpm()
+        if bpm:
+            self._metro_bpm_lbl.setText(f"BPM: {bpm:.0f}")
+        self.statusBar().showMessage(f"音声読み込み完了 ({_fmt_time(dur)})")
+
+    # ── プレイヤー: 再生制御 ────────────────────────────────────────────────────
+
+    def _toggle_play(self) -> None:
+        if not self._player.is_loaded:
+            return
+        if self._player.is_playing:
+            self._player.pause()
+            self._play_btn.setText("▶")
+        else:
+            self._player.play()
+            self._play_btn.setText("⏸")
+
+    def _stop_playback(self) -> None:
+        self._player.stop()
+        self._play_btn.setText("▶")
+        dur = self._player.duration_sec
+        self._prog_slider.setValue(0)
+        self._time_lbl.setText(f"0:00 / {_fmt_time(dur)}")
+
+    def _update_pos(self) -> None:
+        """100ms ごとにプログレスバーと時刻ラベルを更新する。"""
+        if not self._player.is_loaded or self._prog_seeking:
+            return
+        pos = self._player.position_sec
+        dur = self._player.duration_sec
+        if dur > 0:
+            self._prog_slider.setValue(int(pos / dur * 10000))
+        self._time_lbl.setText(f"{_fmt_time(pos)} / {_fmt_time(dur)}")
+        # 再生終了チェック
+        if not self._player.is_playing and self._play_btn.text() == "⏸":
+            self._play_btn.setText("▶")
+
+    def _on_prog_press(self) -> None:
+        self._prog_seeking = True
+
+    def _on_prog_release(self) -> None:
+        dur = self._player.duration_sec
+        if dur > 0:
+            sec = self._prog_slider.value() / 10000.0 * dur
+            self._player.seek(sec)
+        self._prog_seeking = False
+
+    # ── プレイヤー: 速度・音程 ──────────────────────────────────────────────────
+
+    def _on_speed_released(self) -> None:
+        speed = self._speed_slider.value() / 100.0
+        self._player.set_speed(speed)
+        self._was_playing = self._player.is_playing
+        if self._was_playing:
+            self._player.pause()
+        self._set_player_enabled(False)
+        self.statusBar().showMessage(f"速度 {speed:.2f}x に変更中... (librosa time_stretch 処理中)")
+        self._start_fx_worker()
+
+    def _on_pitch_released(self) -> None:
+        pitch = self._pitch_slider.value()
+        self._player.set_pitch(pitch)
+        self._was_playing = self._player.is_playing
+        if self._was_playing:
+            self._player.pause()
+        self._set_player_enabled(False)
+        label = f"+{pitch}" if pitch > 0 else ("±0" if pitch == 0 else str(pitch))
+        self.statusBar().showMessage(f"音程 {label} 半音 に変更中... (librosa pitch_shift 処理中)")
+        self._start_fx_worker()
+
+    def _start_fx_worker(self) -> None:
+        def _task() -> str:
+            self._player.rebuild()
+            return "done"
+
+        w = _Worker(_task)
+        w.finished.connect(self._on_fx_ready)
+        w.error.connect(lambda msg: self.statusBar().showMessage(f"エフェクトエラー: {msg}"))
+        w.start()
+
+    def _on_fx_ready(self, _: str) -> None:
+        self._set_player_enabled(True)
+        speed = self._player.speed
+        pitch = self._player.pitch
+        p_str = f"+{pitch}" if pitch > 0 else ("±0" if pitch == 0 else str(pitch))
+        self.statusBar().showMessage(f"速度 {speed:.2f}x / 音程 {p_str} 半音 適用完了")
+        if self._was_playing:
+            self._player.play()
+            self._play_btn.setText("⏸")
+
+    # ── プレイヤー: A-B ループ ──────────────────────────────────────────────────
+
+    def _set_loop_a(self) -> None:
+        self._loop_a_sec = self._player.position_sec
+        self._loop_a_btn.setText(f"[ A: {_fmt_time(self._loop_a_sec)} ]")
+        self._try_apply_loop()
+
+    def _set_loop_b(self) -> None:
+        self._loop_b_sec = self._player.position_sec
+        self._loop_b_btn.setText(f"[ B: {_fmt_time(self._loop_b_sec)} ]")
+        self._try_apply_loop()
+
+    def _try_apply_loop(self) -> None:
+        a, b = self._loop_a_sec, self._loop_b_sec
+        if a is not None and b is not None and abs(b - a) > 0.1:
+            self._player.set_loop(min(a, b), max(a, b))
+
+    def _clear_loop(self) -> None:
+        self._loop_a_sec = self._loop_b_sec = None
+        self._player.clear_loop()
+        self._loop_a_btn.setText("[ A 点 セット ]")
+        self._loop_b_btn.setText("[ B 点 セット ]")
+
+    # ── プレイヤー: メトロノーム ────────────────────────────────────────────────
+
+    def _toggle_metro(self, checked: bool) -> None:
+        if checked:
+            bpm = self._get_bpm() or 120.0
+            self._metro_timer.start(int(60000 / bpm))
+            self._metro_bpm_lbl.setText(f"BPM: {bpm:.0f}")
+        else:
+            self._metro_timer.stop()
+
+    def _metro_tick(self) -> None:
+        try:
+            import sounddevice as _sd
+            _sd.play(self._click_snd, samplerate=_SR_CLICK, blocking=False)
+        except Exception:
+            pass
+
+    # ── プレイヤー: ユーティリティ ──────────────────────────────────────────────
+
+    def _get_bpm(self) -> Optional[float]:
+        if self._last_drum_result:
+            return self._last_drum_result.bpm
+        if self._last_bass_result:
+            return self._last_bass_result.bpm
+        if self._last_guitar_result:
+            return self._last_guitar_result.bpm
+        return None
+
+    def _set_player_enabled(self, enabled: bool) -> None:
+        for w in (self._play_btn, self._stop_btn, self._prog_slider,
+                  self._speed_slider, self._pitch_slider,
+                  self._loop_a_btn, self._loop_b_btn, self._loop_clr_btn,
+                  self._metro_btn):
+            w.setEnabled(enabled)

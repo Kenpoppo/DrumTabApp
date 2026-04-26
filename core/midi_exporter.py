@@ -3,7 +3,8 @@ core/midi_exporter.py
 ─────────────────────────────────────────────────────────────────────────────
 解析結果を Standard MIDI File (.mid) としてエクスポートする。
 
-TuxGuitar / DAW 等で読み込み・再生可能。
+DAW (Cubase, Logic, Reaper 等) や MuseScore で読み込み・再生可能。
+TuxGuitar は .gp5 形式をネイティブとするため、MIDI では TAB 表示不可。
   - ドラムトラック: MIDI ch.10 (General MIDI Percussion)
   - ベーストラック: MIDI ch.2  / program 33 (Electric Bass finger)
   - ギタートラック: MIDI ch.3  / program 26 (Acoustic Guitar steel)

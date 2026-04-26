@@ -10,7 +10,7 @@
 </p>
 
 > **音源ファイル（MP3 / WAV）からドラム・ギター・ベースのタブ譜を自動生成するデスクトップアプリ。**  
-> Spotify の神経網モデル「basic-pitch」を統合した高精度モードで、音楽ソフト（TuxGuitar 等）で再生可能な MIDI 出力も対応。
+> Spotify の神経網モデル「basic-pitch」を統合した高精度モードで、DAW や各種音楽ソフトで再生可能な MIDI 出力も対応。
 
 ---
 
@@ -22,7 +22,7 @@
 | 🎸 ギター/ベースTAB | **高速モード** (piptrack DSP) / **高精度モード** (Spotify basic-pitch 神経網) |
 | 🎵 コード進行検出 | Krumhansl-Schmuckler キー検出 + コサイン類似度コードマッチング |
 | 📄 標準ASCII TAB記法 | `1e+a` ビートカウント / HH=`x`・SN/BD=`o` / 小節番号 `m.1, m.2…` |
-| 🎹 MIDI書き出し | TuxGuitar / DAW 対応 (.mid)。ドラム ch.10、ベース/ギター別チャンネル |
+| 🎹 MIDI書き出し | DAW / MuseScore 対応 (.mid)。ドラム ch.10、ベース/ギター別チャンネル |
 | 📑 PDF書き出し | Courier フォントでそのまま印刷可能 |
 
 ---
@@ -85,7 +85,7 @@ DrumTabApp/
     │
     └─ エクスポート ─┬─ ASCII TAB テキスト (画面表示)
                      ├─ PDF (.pdf)
-                     └─ Standard MIDI (.mid) → TuxGuitar / DAW
+                     └─ Standard MIDI (.mid) → DAW / MuseScore 等
 ```
 
 ---
@@ -143,12 +143,16 @@ python main.py
 3. 🧠 **高精度モード (basic-pitch)** チェックをONにすると神経網で解析（より正確）
 4. 結果を画面で確認後、**PDF エクスポート** または **MIDI 書き出し**
 
-### TuxGuitar での活用
+### MIDI ファイルの活用
 
-MIDI 書き出しした `.mid` ファイルを TuxGuitar で開くと：
-- ドラムトラック (ch.10) → ドラム譜として表示
-- ベーストラック (ch.2) → ベース TAB として表示
-- ギタートラック (ch.3) → ギター TAB として表示
+MIDI 書き出しした `.mid` ファイルは以下で利用できます：
+- **DAW** (Cubase, Logic, Ableton, Reaper 等) でマルチトラック再生・編集
+- **MuseScore** で楽譜として表示・印刷
+- **Windows Media Player / QuickTime** などで再生
+
+> **TuxGuitar で TAB 表示するには `.gp5` 形式が必要です。**  
+> TuxGuitar のサポート形式: `.tg / .gp / .gpx / .gtp / .gp3 / .gp4 / .gp5 / .ptb / .tef`  
+> `.gp5` エクスポートはロードマップに記載しています。
 
 ---
 
@@ -207,7 +211,7 @@ Spotify の [basic-pitch](https://github.com/spotify/basic-pitch) (ICASSP 2022) 
 
 | ツール | 強み | 参照点 |
 |---|---|---|
-| [TuxGuitar](https://tuxguitar.app/) | GP5/MIDI 表示・再生 | MIDI ch割り当て規約 |
+| [TuxGuitar](https://tuxguitar.app/) | .gp5/.tg 形式のTAB表示 | GP5エクスポート目標の参照先 |
 | [MuseScore](https://musescore.org/) | MusicXML 標準対応 | 楽譜品質の基準 |
 | [basic-pitch](https://github.com/spotify/basic-pitch) (Spotify) | 軽量 CNN 多声音検出 | ✅ 高精度モードとして統合済み |
 | [CREPE](https://github.com/marl/crepe) | モノフォニック高精度 | 単音楽器への応用 |

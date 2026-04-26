@@ -14,18 +14,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
+import os
 
 import numpy as np
 import librosa
 
 # ── 定数 ──────────────────────────────────────────────────────────────────────
-_MAG_THRESHOLD = 8.0    # piptrack マグニチュード閾値のフォールバック値（適応閾値が使えない場合に使用）
-_SUBDIVISIONS  = 4      # 1 拍あたりの分割数（16th note = 4 で高解像度TAB）
-_MEASURES_PER_LINE = 2  # TAB 1 行あたりの小節数（SUBDIVISIONS=4 時に行長を適切に保つ）
+_MAG_THRESHOLD = 8.0    # piptrack マグニチュード閾値のフォールバック値
+_SUBDIVISIONS  = 4      # 1 拍あたりの分割数（16th note）
+_MEASURES_PER_LINE = 2  # TAB 1 行あたりの小節数
 _COLS_PER_MEASURE  = 4 * _SUBDIVISIONS   # 小節あたりの列数 (4/4 拍子)
 
 # 弦チューニング: 各弦の開放弦 MIDI ノート番号（高弦→低弦順）
-# ベース: E1=28, A1=33, D2=38, G2=43 が標準4弦ベースチューニング
 _TUNINGS: Dict[str, List[int]] = {
     "guitar": [64, 59, 55, 50, 45, 40],   # e4 B3 G3 D3 A2 E2
     "bass":   [43, 38, 33, 28],           # G2 D2 A1 E1 (標準ベースチューニング)
@@ -35,17 +35,23 @@ _STRING_NAMES: Dict[str, List[str]] = {
     "bass":   ["G", "D", "A", "E"],
 }
 
-# 楽器別 MIDI 音域: 音域外の誤検出(倍音など)を除去
+# 楽器別 MIDI 音域
+# ベース: G3(55)以上はほぼ倍音誤検出のため 28-55 に絞る
 _MIDI_RANGE: Dict[str, Tuple[int, int]] = {
     "guitar": (40, 88),   # E2 〜 E6
-    "bass":   (28, 67),   # E1 〜 G4 (G弦24フレット=43+24=67)
+    "bass":   (28, 55),   # E1 〜 G3 (実用ベース音域)
 }
 
-# 楽器別 piptrack fmin: 開放弦最低音より下から検索して基音を確実に捉える
+# 楽器別 piptrack fmin
 _FMIN: Dict[str, float] = {
-    "guitar": librosa.note_to_hz("D2"),   # ~73 Hz (ギター低E=82 Hzより少し下)
-    "bass":   librosa.note_to_hz("C1"),   # ~33 Hz (ベース低E=41 Hzより下)
+    "guitar": librosa.note_to_hz("D2"),
+    "bass":   librosa.note_to_hz("C1"),
 }
+
+# BPM 候補探索範囲: 複数の start_bpm で推定し最も確信度が高いものを選ぶ
+_BPM_CANDIDATES = [60, 75, 90, 100, 120, 140]
+# 許容 BPM 範囲（ほとんどのポップス曲は 60-200 BPM）
+_BPM_MIN, _BPM_MAX = 60.0, 200.0
 
 
 # ── データモデル ───────────────────────────────────────────────────────────────
@@ -84,14 +90,10 @@ def analyze(audio_path: str, instrument: str,
     # HPSS: 倍音成分でピッチ検出 → ドラムや打音によるピッチ誤検出を抑制
     y_harm, _ = librosa.effects.hpss(y, margin=3.0)
 
-    # BPM 推定（元信号で行うほうが安定）
-    tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
-    bpm = float(np.atleast_1d(tempo)[0])
-    if bpm < 40.0:
-        bpm = 120.0   # 非音楽的な推定値のフォールバック
+    # BPM 推定: 複数の start_bpm で候補を出し onset 相関が最大のものを採用
+    bpm = _estimate_bpm(y, sr, audio_path=audio_path)
 
     # ピッチ検出（倍音成分で実施）
-    # fmin で楽器の最低音付近から探索して基音を確実に捉える
     hop_length = 512
     fmin = _FMIN[instrument]
     pitches, magnitudes = librosa.piptrack(
@@ -140,6 +142,10 @@ def analyze(audio_path: str, instrument: str,
             bpm=bpm,
         )
 
+    # モノフォニック化: ベースは単音楽器なので近接ノートを間引く
+    if instrument == "bass":
+        timed_notes = _mono_filter(timed_notes, window_sec=0.08)
+
     tab_text = _render_tab(timed_notes, instrument, bpm, chords=chords, key=key)
     return TabResult(
         instrument=instrument,
@@ -148,6 +154,94 @@ def analyze(audio_path: str, instrument: str,
         bpm=bpm,
         timed_notes=timed_notes,
     )
+
+
+# ── 内部ヘルパー ───────────────────────────────────────────────────────────────
+
+def _estimate_bpm(y: np.ndarray, sr: int, audio_path: str = "") -> float:
+    """
+    BPM を推定する。
+
+    優先順位:
+      1. 同ディレクトリに drums.wav があればそれで推定（最も安定）
+      2. 渡された y（ベース/ギターステム）で推定
+         複数の start_bpm で beat_track を実行し、平均ビート強度が最高の BPM を選択。
+    """
+    # ── drums.wav 優先パス ─────────────────────────────────────────────────
+    if audio_path:
+        drums_path = os.path.join(os.path.dirname(audio_path), "drums.wav")
+        if os.path.isfile(drums_path) and drums_path != audio_path:
+            try:
+                y_d, sr_d = librosa.load(drums_path, sr=None, mono=True, dtype=np.float32)
+                t, _ = librosa.beat.beat_track(y=y_d, sr=sr_d, start_bpm=120.0)
+                bpm_d = float(np.atleast_1d(t)[0])
+                if _BPM_MIN <= bpm_d <= _BPM_MAX:
+                    return bpm_d
+            except Exception:
+                pass  # フォールバックへ
+
+    # ── ステム単体での推定（フォールバック） ──────────────────────────────
+    onset_env = librosa.onset.onset_strength(y=y, sr=sr)
+    candidates: List[Tuple[float, float]] = []  # (bpm, score)
+    for start in _BPM_CANDIDATES:
+        t, beats = librosa.beat.beat_track(
+            y=y, sr=sr, start_bpm=float(start)
+        )
+        bpm_cand = float(np.atleast_1d(t)[0])
+        if not (_BPM_MIN <= bpm_cand <= _BPM_MAX) or len(beats) == 0:
+            continue
+        # 平均ビート強度 (onset合計 / ビート数) → ビート数に依らず比較可能
+        score = float(onset_env[beats].mean())
+        candidates.append((bpm_cand, score))
+
+    if not candidates:
+        return 120.0
+
+    best_bpm = max(candidates, key=lambda x: x[1])[0]
+    return best_bpm if _BPM_MIN <= best_bpm <= _BPM_MAX else 120.0
+
+
+def _mono_filter(
+    notes: List[Tuple[float, int]],
+    window_sec: float = 0.08,
+) -> List[Tuple[float, int]]:
+    """
+    モノフォニック化フィルター。
+    window_sec 以内に複数ノートがある場合:
+      1. オクターブ重複 → より低い音（基音）を残す
+      2. 同時多声音 → 最も低い音を残す（ベースは最低音が基音）
+    """
+    if not notes:
+        return notes
+
+    # 時刻でグループ化
+    groups: List[List[Tuple[float, int]]] = []
+    current: List[Tuple[float, int]] = [notes[0]]
+    for t, m in notes[1:]:
+        if abs(t - current[0][0]) <= window_sec:
+            current.append((t, m))
+        else:
+            groups.append(current)
+            current = [(t, m)]
+    groups.append(current)
+
+    result: List[Tuple[float, int]] = []
+    for grp in groups:
+        midis = [m for _, m in grp]
+        times = [t for t, _ in grp]
+        # オクターブ関係を除去: 低い音を優先
+        keep_midis: List[int] = []
+        for m in sorted(set(midis)):
+            if not any(abs(m - k) == 12 or abs(m - k) == 24 for k in keep_midis):
+                keep_midis.append(m)
+        # 最低音のみ残す
+        chosen = min(keep_midis)
+        avg_t  = float(np.mean([t for t, m in grp if m == chosen or
+                                 any(abs(m - k) == 12 or abs(m - k) == 24
+                                     for k in [chosen])]))
+        result.append((times[0], chosen))
+
+    return result
 
 
 # ── 内部ヘルパー ───────────────────────────────────────────────────────────────
@@ -174,16 +268,18 @@ def _render_tab(
     # 列インデックス → (弦インデックス, フレット番号)
     col_map: Dict[int, Tuple[int, int]] = {}
     placed = 0
+    prev_string: Optional[int] = None   # ポジション連続性のため直前の弦を記憶
+    prev_fret:   Optional[int] = None
     for t_sec, midi in timed_notes:
         col = int(round(t_sec / subdiv_sec))
         if col in col_map:
             continue   # 同一グリッド位置は先着優先
-        for s, open_note in enumerate(tuning):
-            fret = midi - open_note
-            if 0 <= fret <= 24:
-                col_map[col] = (s, fret)
-                placed += 1
-                break
+        best = _choose_string(midi, tuning, prev_string, prev_fret, instrument=instrument)
+        if best is not None:
+            s, fret = best
+            col_map[col] = (s, fret)
+            placed += 1
+            prev_string, prev_fret = s, fret
 
     if not col_map:
         return "弾ける音域の音符が検出されませんでした。"
@@ -247,3 +343,52 @@ def _render_tab(
         output.append("")   # 行間スペース
 
     return "\n".join(output)
+
+
+def _choose_string(
+    midi: int,
+    tuning: List[int],
+    prev_string: Optional[int],
+    prev_fret:   Optional[int],
+    instrument:  str = "guitar",
+) -> Optional[Tuple[int, int]]:
+    """
+    MIDI ノートを弦・フレットに割り当てる。
+
+    優先順位:
+      1. フレット範囲 0-24 に収まる弦のみ候補とする
+      2. 前のノートと同じ弦で隣接フレット（差 ≤ 5）ならポジション加点 (−10)
+      3. ベースの場合: 低弦(E/A)優先バイアス + 中間フレット(3-9)優先
+      4. 残りはフレット番号最小の弦を選択
+    """
+    n_strings = len(tuning)
+    candidates: List[Tuple[float, int, int]] = []  # (score, fret, string_idx)
+    for s, open_note in enumerate(tuning):
+        fret = midi - open_note
+        if not (0 <= fret <= 24):
+            continue
+        score: float = float(fret)
+
+        # ── ポジション連続性ボーナス ─────────────────────
+        if prev_string is not None and prev_fret is not None:
+            if s == prev_string and abs(fret - prev_fret) <= 5:
+                score -= 10   # 同弦近傍ポジション = 大きなボーナス
+
+        # ── ベース固有: 低弦(E/A)優先バイアス ────────────
+        # tuning は高弦→低弦順 (index 0=G, 1=D, 2=A, 3=E)
+        # 低弦ほど index が大きい → index を使って低弦優先バイアスを付ける
+        if instrument == "bass":
+            # E/A弦(index 2-3)を D/G弦より優先 (ベーシストはE/A弦を好む)
+            string_depth = s  # 0=G(最高), n-1=E(最低)
+            score -= string_depth * 1.5   # E弦は最大 -4.5 ボーナス
+
+            # 中間フレット(3-9)優先: 開放弦・低フレットは実奏では少ない
+            if fret <= 2:
+                score += 4.0   # 開放弦〜2フレットのペナルティ
+
+        candidates.append((score, fret, s))
+    if not candidates:
+        return None
+    candidates.sort()
+    _, fret, s = candidates[0]
+    return s, fret

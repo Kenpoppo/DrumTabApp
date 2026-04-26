@@ -93,19 +93,29 @@ DrumTabApp/
   │
   ▼ librosa.load (sr=None, mono, float32)
   │
-  ▼ librosa.effects.hpss → y_harm（倍音成分）
+  ├── _estimate_bpm(y, sr, audio_path)
+  │     → drums.wav が同ディレクトリにあれば drums.wav で BPM 推定（最精度）
+  │     → なければ複数 start_bpm 候補でフォールバック
   │
-  ├── librosa.beat.beat_track(y_full)    → BPM グリッド
-  │
-  ▼ librosa.piptrack(y_harm)             → pitches, magnitudes
-  │
-  ▼ フィルタ (mag >= threshold & pitch > 0 & dedup)
+  ┌─────────────────────────────────────────────────────────────────┐
+  │ basic-pitch モード (core/basic_pitch_analyzer.py)               │
+  │   basic_pitch.inference.predict(onset_threshold, frame_threshold)│
+  │     → note_events[(start, end, midi, velocity, bends)]          │
+  │   [bass のみ] _correct_bass_octaves()                           │
+  │     → Spleeter 倍音補正: e_low/e_high >= 0.15 ならオクターブ下  │
+  │   [bass のみ] _mono_filter(window_sec=0.08)                     │
+  │     → ポリフォニー解消: 80ms 窓内の最低音のみ残す               │
+  └─────────────────────────────────────────────────────────────────┘
   │
   ▼ BPM グリッドに量子化                  → col_map
   │
+  ▼ _choose_string(midi, tuning, prev_string, prev_fret, instrument)
+  │   → ギター: フレット最小 + ポジション連続性
+  │   → ベース: E/A弦優先バイアス(string_depth×1.5) + 開放弦ペナルティ
+  │
   ▼ _render_tab()                        → 小節単位 TAB テキスト
   │
-  ▼ TabResult(instrument, tab_text, note_count, bpm)
+  ▼ TabResult(instrument, tab_text, note_count, bpm, timed_notes)
 ```
 
 ---
@@ -140,3 +150,4 @@ DrumTabApp/
 | 日付 | 変更内容 |
 |---|---|
 | 2026-04-26 | `core/` + `ui/` パッケージ構成に再設計。旧ファイル群は残存 |
+| 2025-07-xx | ベースTAB精度改善: basic_pitch_analyzer に `_correct_bass_octaves` 追加、`_estimate_bpm` (drums.wav優先)・`_mono_filter`・`_choose_string` bass拡張を pitch_analyzer に追加 |

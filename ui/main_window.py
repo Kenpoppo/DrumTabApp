@@ -84,6 +84,7 @@ class MainWindow(QMainWindow):
         self._drum_btn   = QPushButton("Drum 解析")
         self._export_btn = QPushButton("PDF エクスポート")
         self._midi_btn   = QPushButton("MIDI 書き出し")
+        self._gp_btn     = QPushButton("🎸 GP書き出し (TuxGuitar)")
 
         # 高精度モード切替（basic-pitch 神経網 vs piptrack DSP）
         self._hq_check = QCheckBox("🧠 高精度モード (basic-pitch)")
@@ -97,6 +98,7 @@ class MainWindow(QMainWindow):
         self._drum_btn.clicked.connect(self._run_drum)
         self._export_btn.clicked.connect(self._export_pdf)
         self._midi_btn.clicked.connect(self._export_midi)
+        self._gp_btn.clicked.connect(self._export_gp)
 
         # TAB 表示エリア（等幅フォント）
         self._display = QTextEdit()
@@ -111,7 +113,7 @@ class MainWindow(QMainWindow):
 
         btn_row = QHBoxLayout()
         for btn in (self._guitar_btn, self._bass_btn, self._drum_btn,
-                    self._export_btn, self._midi_btn):
+                    self._export_btn, self._midi_btn, self._gp_btn):
             btn_row.addWidget(btn)
         btn_row.addWidget(self._hq_check)
 
@@ -130,6 +132,7 @@ class MainWindow(QMainWindow):
         # 解析ボタンはファイル選択後に有効化
         self._set_analysis_enabled(False)
         self._midi_btn.setEnabled(False)  # 解析完了後に有効化
+        self._gp_btn.setEnabled(False)    # 解析完了後に有効化
 
     # ── ファイル選択 ────────────────────────────────────────────────────────────
     def _select_file(self) -> None:
@@ -234,15 +237,57 @@ class MainWindow(QMainWindow):
     def _on_done(self, result: str) -> None:
         self._display.setPlainText(result)
         self._set_analysis_enabled(True)
-        # 解析結果があれば MIDI 書き出しボタンを有効化
+        # 解析結果があれば MIDI / GP 書き出しボタンを有効化
         if any([self._last_drum_result, self._last_bass_result, self._last_guitar_result]):
             self._midi_btn.setEnabled(True)
+            self._gp_btn.setEnabled(True)
         self.statusBar().showMessage("完了")
 
     def _on_error(self, message: str) -> None:
         self._display.setPlainText(f"エラーが発生しました:\n\n{message}")
         self._set_analysis_enabled(True)
         self.statusBar().showMessage("エラー発生")
+
+    # ── GP 書き出し (TuxGuitar .gp4) ──────────────────────────────────────────
+    def _export_gp(self) -> None:
+        has_result = any([self._last_drum_result,
+                          self._last_bass_result,
+                          self._last_guitar_result])
+        if not has_result:
+            self.statusBar().showMessage("GP 書き出し: 先に解析を実行してください")
+            return
+
+        save_path, _ = QFileDialog.getSaveFileName(
+            self, "GP ファイル保存先を選択", _DOWNLOADS,
+            "Guitar Pro 4 (*.gp4);;Guitar Pro 5 (*.gp5)"
+        )
+        if not save_path:
+            return
+
+        base_name = os.path.splitext(os.path.basename(
+            self._selected_file or "DrumTabApp"
+        ))[0]
+
+        try:
+            from core.gp5_exporter import export_gp5
+            bpm = (
+                self._last_drum_result.bpm   if self._last_drum_result   else
+                self._last_bass_result.bpm   if self._last_bass_result   else
+                self._last_guitar_result.bpm
+            )
+            result = export_gp5(
+                save_path, bpm,
+                drum_result=self._last_drum_result,
+                bass_result=self._last_bass_result,
+                guitar_result=self._last_guitar_result,
+                title=base_name[:40],
+            )
+            self.statusBar().showMessage(
+                f"GP 書き出し完了: {result.n_tracks} トラック / "
+                f"{result.n_measures} 小節 → {os.path.basename(save_path)}"
+            )
+        except Exception as exc:
+            self.statusBar().showMessage(f"GP 書き出しエラー: {exc}")
 
     # ── MIDI 書き出し ─────────────────────────────────────────────────────────
     def _export_midi(self) -> None:
@@ -303,7 +348,8 @@ class MainWindow(QMainWindow):
     def _set_analysis_enabled(self, enabled: bool) -> None:
         for btn in (self._guitar_btn, self._bass_btn, self._drum_btn, self._export_btn):
             btn.setEnabled(enabled)
-        # MIDI ボタンは解析結果があるかどうかで連動
+        # MIDI / GP ボタンは解析結果があるかどうかで連動
         # （解析中は禁止、完了後は _on_done 内で再判定）
         if not enabled:
             self._midi_btn.setEnabled(False)
+            self._gp_btn.setEnabled(False)

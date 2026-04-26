@@ -19,6 +19,7 @@ from typing import Callable, Optional
 
 from PyQt5.QtCore import QThread, pyqtSignal
 from PyQt5.QtWidgets import (
+    QCheckBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -84,6 +85,13 @@ class MainWindow(QMainWindow):
         self._export_btn = QPushButton("PDF エクスポート")
         self._midi_btn   = QPushButton("MIDI 書き出し")
 
+        # 高精度モード切替（basic-pitch 神経網 vs piptrack DSP）
+        self._hq_check = QCheckBox("🧠 高精度モード (basic-pitch)")
+        self._hq_check.setToolTip(
+            "ONにすると Spotify basic-pitch 神経網で解析します。\n"
+            "精度が大幅に向上しますが、処理に数十秒かかる場合があります。"
+        )
+
         self._guitar_btn.clicked.connect(self._run_guitar)
         self._bass_btn.clicked.connect(self._run_bass)
         self._drum_btn.clicked.connect(self._run_drum)
@@ -105,6 +113,7 @@ class MainWindow(QMainWindow):
         for btn in (self._guitar_btn, self._bass_btn, self._drum_btn,
                     self._export_btn, self._midi_btn):
             btn_row.addWidget(btn)
+        btn_row.addWidget(self._hq_check)
 
         layout = QVBoxLayout()
         layout.addLayout(file_row)
@@ -140,33 +149,53 @@ class MainWindow(QMainWindow):
     # ── 解析ランチャー ──────────────────────────────────────────────────────────
     def _run_guitar(self) -> None:
         path = self._selected_file
+        use_hq = self._hq_check.isChecked()
         def _task() -> str:
             ca = __import__("core.chord_analyzer", fromlist=["analyze"])
-            pa = __import__("core.pitch_analyzer",  fromlist=["analyze"])
             chord_result = ca.analyze(path)
-            tab_result = pa.analyze(
-                path, "guitar",
-                chords=chord_result.chord_per_measure,
-                key=chord_result.key,
-            )
-            self._last_guitar_result = tab_result  # MIDI 書き出し用に保持
+            if use_hq:
+                bp = __import__("core.basic_pitch_analyzer", fromlist=["analyze"])
+                tab_result = bp.analyze(
+                    path, "guitar",
+                    chords=chord_result.chord_per_measure,
+                    key=chord_result.key,
+                )
+            else:
+                pa = __import__("core.pitch_analyzer", fromlist=["analyze"])
+                tab_result = pa.analyze(
+                    path, "guitar",
+                    chords=chord_result.chord_per_measure,
+                    key=chord_result.key,
+                )
+            self._last_guitar_result = tab_result
             return tab_result.tab_text
-        self._launch("Guitar TAB 生成", _task)
+        label = "Guitar TAB 生成 (高精度)" if use_hq else "Guitar TAB 生成"
+        self._launch(label, _task)
 
     def _run_bass(self) -> None:
         path = self._selected_file
+        use_hq = self._hq_check.isChecked()
         def _task() -> str:
             ca = __import__("core.chord_analyzer", fromlist=["analyze"])
-            pa = __import__("core.pitch_analyzer",  fromlist=["analyze"])
             chord_result = ca.analyze(path)
-            tab_result = pa.analyze(
-                path, "bass",
-                chords=chord_result.chord_per_measure,
-                key=chord_result.key,
-            )
-            self._last_bass_result = tab_result  # MIDI 書き出し用に保持
+            if use_hq:
+                bp = __import__("core.basic_pitch_analyzer", fromlist=["analyze"])
+                tab_result = bp.analyze(
+                    path, "bass",
+                    chords=chord_result.chord_per_measure,
+                    key=chord_result.key,
+                )
+            else:
+                pa = __import__("core.pitch_analyzer", fromlist=["analyze"])
+                tab_result = pa.analyze(
+                    path, "bass",
+                    chords=chord_result.chord_per_measure,
+                    key=chord_result.key,
+                )
+            self._last_bass_result = tab_result
             return tab_result.tab_text
-        self._launch("Bass TAB 生成", _task)
+        label = "Bass TAB 生成 (高精度)" if use_hq else "Bass TAB 生成"
+        self._launch(label, _task)
 
     def _run_drum(self) -> None:
         path = self._selected_file

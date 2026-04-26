@@ -2,21 +2,15 @@ import os
 import sys
 import numpy as np
 import librosa
-import librosa.display
-import matplotlib.pyplot as plt
-import scipy.signal as signal
-from attack_time_analysis import analyze_attack_time  # ✅ attack_time_analysisをインポート
-import matplotlib.font_manager as fm
 import matplotlib
+import matplotlib.pyplot as plt
+from attack_time_analysis import analyze_attack_time
 
-# ✅ Unicodeフォントエラー対策
 matplotlib.rcParams['axes.unicode_minus'] = False
 
-# ✅ 日本語フォント設定
-plt.rcParams['font.family'] = 'AppleGothic'  # MacならこれでOK
+# 📂 ダウンロードディレクトリのパス (実行ファイル基準)
+downloads_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "downloads")
 
-# 📂 ダウンロードディレクトリのパス
-downloads_dir = "/Users/fujimakikenji/DrumTabApp/downloads"
 
 # 📂 最新の音源ファイルを取得する関数
 def get_latest_audio_file(directory):
@@ -27,50 +21,89 @@ def get_latest_audio_file(directory):
     latest_file = max(files, key=lambda x: os.path.getmtime(os.path.join(directory, x)))
     return latest_file
 
-# ✅ analyze_drum 関数の追加
+
+def _classify_drum_hit(y, sr, frame_idx, hop_length):
+    """
+    オンセットフレームの周波数特性でドラム種別を分類する。
+    - Kick  : 低域エネルギー (20–200 Hz) が支配的
+    - Snare : 中高域エネルギー (200–8000 Hz) が支配的
+    - Hi-Hat: 高域エネルギー (8000 Hz+) が支配的
+    """
+    center = frame_idx * hop_length
+    window = y[max(0, center - hop_length): center + hop_length]
+    if len(window) == 0:
+        return "Unknown"
+
+    fft = np.abs(np.fft.rfft(window, n=2048))
+    freqs = np.fft.rfftfreq(2048, d=1.0 / sr)
+
+    def band_energy(lo, hi):
+        mask = (freqs >= lo) & (freqs < hi)
+        return float(np.sum(fft[mask] ** 2))
+
+    kick_e  = band_energy(20, 200)
+    snare_e = band_energy(200, 8000)
+    hihat_e = band_energy(8000, sr / 2)
+
+    idx = np.argmax([kick_e, snare_e, hihat_e])
+    return ["Kick", "Snare", "Hi-Hat"][idx]
+
+
 def analyze_drum(audio_path):
-    # 📥 音源の読み込み (モノラル & float32でメモリ節約)
+    # 📥 音源の読み込み
     y, sr = librosa.load(audio_path, sr=22050, mono=True, dtype=np.float32)
 
-    # 🔍 アタックタイムの解析 (ピーク検出)
-    peaks, _ = signal.find_peaks(y, height=0.05, distance=sr // 10)
-    attack_times = np.diff(peaks) / sr
+    hop_length = 512
 
-    # 🥁 ドラム譜の生成 (仮)
-    drum_tab = ""
-    for i, peak in enumerate(peaks[:50]):  # 最初の50個だけ表示
-        drum_tab += f"音符 {i+1}: 時間 {peak / sr:.2f} 秒\n"
+    # 🔍 BPM・ビート検出
+    tempo, beat_frames = librosa.beat.beat_track(y=y, sr=sr, hop_length=hop_length)
+    beat_times = librosa.frames_to_time(beat_frames, sr=sr, hop_length=hop_length)
 
-    # 🔍 特徴量の計算
-    zero_crossings = librosa.feature.zero_crossing_rate(y)
+    # 🔍 オンセット検出 (生波形ピーク検出より高精度)
+    onset_frames = librosa.onset.onset_detect(
+        y=y, sr=sr, hop_length=hop_length,
+        units='frames', backtrack=True,
+        pre_max=3, post_max=3, pre_avg=5, post_avg=5, delta=0.07, wait=10
+    )
+    onset_times = librosa.frames_to_time(onset_frames, sr=sr, hop_length=hop_length)
+
+    # 🥁 ドラム種別分類 + タブ生成
+    labels = [_classify_drum_hit(y, sr, f, hop_length) for f in onset_frames]
+    attack_times = np.diff(onset_times)
+
+    drum_tab_lines = []
+    for i, (t, label) in enumerate(zip(onset_times[:60], labels[:60])):
+        drum_tab_lines.append(f"  [{i+1:3d}] {t:6.2f}s  {label}")
+    drum_tab = "\n".join(drum_tab_lines)
+
+    # 🔍 特徴量
+    zero_crossings    = librosa.feature.zero_crossing_rate(y)
     spectral_centroid = librosa.feature.spectral_centroid(y=y, sr=sr)
 
-    # 🖊 結果表示 (GUI用に返す)
+    tempo_val = float(np.atleast_1d(tempo)[0])
     result = (
         f"📊 ドラム解析結果:\n"
         f"サンプリングレート: {sr} Hz\n"
+        f"推定BPM: {tempo_val:.1f}\n"
         f"平均ゼロ交差率: {np.mean(zero_crossings):.4f}\n"
         f"平均スペクトルセントロイド: {np.mean(spectral_centroid):.2f} Hz\n"
-        f"ピーク数: {len(peaks)}\n"
+        f"検出オンセット数: {len(onset_frames)}\n"
         f"平均アタックタイム: {np.mean(attack_times):.4f} 秒\n\n"
-        f"{drum_tab}"
+        f"--- ドラムヒット一覧 (先頭60件) ---\n"
+        f"{drum_tab}\n"
     )
 
-    # 📊 attack_time_analysis を使った解析
-    # 🚫 plt.show() を使わないように変更 (保存のみにする)
     analyze_attack_time(audio_path)
-    plt.close()  # ✅ plt.show() を使わない代わりに plt.close() でメモリ開放
+    plt.close()
 
-    # 🥁 ドラム譜を返す (GUIで使う用)
     return result if drum_tab else "🥁 ドラム譜が生成されませんでした"
 
-# ✅ メイン処理: コマンドラインから直接実行された場合
-if __name__ == "__main__":
-    # 🔄 コマンドライン引数からファイルを取得 (指定がなければ最新ファイル)
-    audio_file = sys.argv[1] if len(sys.argv) > 1 else get_latest_audio_file(downloads_dir)
-    audio_path = os.path.join(downloads_dir, audio_file)
 
-    # 🔍 ファイルが存在するかチェック
+# ✅ メイン処理
+if __name__ == "__main__":
+    audio_file = sys.argv[1] if len(sys.argv) > 1 else get_latest_audio_file(downloads_dir)
+    audio_path = audio_file if os.path.isabs(audio_file) else os.path.join(downloads_dir, audio_file)
+
     if not os.path.exists(audio_path):
         print(f"❌ ファイルが見つかりません: {audio_path}")
         exit()

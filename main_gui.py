@@ -1,11 +1,12 @@
 import sys
 import os
+import re
 from PyQt5.QtWidgets import QApplication, QMainWindow, QLabel, QPushButton, QTextEdit, QFileDialog, QVBoxLayout, QWidget
-from PyQt5.QtCore import QThread, pyqtSignal  # ✅ QThread をインポート
+from PyQt5.QtCore import QThread, pyqtSignal
 from PyQt5.QtGui import QIcon
-from tab_generator import generate_tab as generate_guitar_tab, generate_tab as generate_bass_tab
-from drum_analyzer import analyze_drum
 from fpdf import FPDF
+from tab_generator import detect_pitches, generate_tab
+from drum_analyzer import analyze_drum
 
 # 📂 ダウンロードディレクトリ設定
 downloads_dir = os.path.join(os.getcwd(), 'downloads')
@@ -84,7 +85,8 @@ class MainWindow(QMainWindow):
     # 🎸 ギターTAB生成処理
     def generate_guitar_tab(self):
         if self.selected_file:
-            tab = generate_guitar_tab(self.selected_file)
+            notes = detect_pitches(self.selected_file)
+            tab = generate_tab(notes, instrument='guitar')
             self.tab_display.setText("🎸 ギターTAB譜\n" + tab)
         else:
             self.tab_display.setText("⚠️ 音源ファイルを選択してください！")
@@ -92,7 +94,8 @@ class MainWindow(QMainWindow):
     # 🪕 ベースTAB生成処理
     def generate_bass_tab(self):
         if self.selected_file:
-            tab = generate_bass_tab(self.selected_file)
+            notes = detect_pitches(self.selected_file)
+            tab = generate_tab(notes, instrument='bass')
             self.tab_display.setText("🪕 ベースTAB譜\n" + tab)
         else:
             self.tab_display.setText("⚠️ 音源ファイルを選択してください！")
@@ -112,29 +115,18 @@ class MainWindow(QMainWindow):
     def display_drum_tab(self, result):
         self.tab_display.setText("🥁 ドラム譜\n" + result)
 
-    from fpdf import FPDF
-
     # 📂 PDFエクスポート処理
     def export_to_pdf(self):
         if self.tab_display.toPlainText():
             pdf = FPDF()
             pdf.add_page()
+            pdf.set_font('Helvetica', '', 12)
 
-            # ✅ フォントの設定 (uni=True は不要)
-            pdf.add_font('ArialUnicode', '', '/Library/Fonts/Arial Unicode.ttf')
-
-            # ✅ フォントとサイズの指定
-            pdf.set_font('ArialUnicode', '', 12)
-
-            # ✅ 絵文字を削除したテキストを取得
-            import re
             clean_text = re.sub(r'[^\x00-\x7F]+', '', self.tab_display.toPlainText())
 
-            # ✅ PDFにテキストを書き込み (ln=1 で次の行に移動)
             for line in clean_text.split("\n"):
                 pdf.cell(0, 10, line, ln=1)
 
-            # ✅ 保存ダイアログを表示
             save_path, _ = QFileDialog.getSaveFileName(self, "エクスポート先を選択", downloads_dir, "PDF Files (*.pdf)")
             if save_path:
                 pdf.output(save_path)

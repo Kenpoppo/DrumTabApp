@@ -50,7 +50,7 @@ warnings.filterwarnings("ignore", category=UserWarning)
 # ベースは低域(58 Hz付近)の基音を捉えるため onset/frame 閾値を低く設定する
 _BP_PARAMS = {
     "guitar": {"onset_threshold": 0.50, "frame_threshold": 0.30, "minimum_note_length": 58},
-    "bass":   {"onset_threshold": 0.35, "frame_threshold": 0.25, "minimum_note_length": 50},
+    "bass":   {"onset_threshold": 0.35, "frame_threshold": 0.25, "minimum_note_length": 100},
 }
 
 
@@ -163,11 +163,21 @@ def analyze(
     defaults = _BP_PARAMS[instrument]
     ot = onset_threshold   if onset_threshold   is not None else defaults["onset_threshold"]
     ft = frame_threshold   if frame_threshold   is not None else defaults["frame_threshold"]
-    ml = minimum_note_length if minimum_note_length is not None else defaults["minimum_note_length"]
 
     # BPM は既存の librosa で取得（beat_track は basic-pitch 非依存）
     y, sr = librosa.load(audio_path, sr=None, mono=True, dtype=np.float32)
     bpm = _estimate_bpm(y, sr, audio_path=audio_path)
+
+    # BPM 連動 minimum_note_length: 16分音符の83%を最小単位とする
+    # (BPM=123時: 0.83×121≈100ms / フル16分より短いと_correct_bass_octavesの補正源音符が失われる)
+    # 呼び出し側が明示した場合はその値を使う
+    if minimum_note_length is not None:
+        ml = minimum_note_length
+    elif instrument == "bass":
+        # 16分音符の 83% [ms] をベースの最小ノート長に設定 (下限 80 ms)
+        ml = max(80, int(60.0 / bpm / 4 * 1000 * 0.83))
+    else:
+        ml = defaults["minimum_note_length"]
 
     # ── ニューラルネットワーク推論 ────────────────────────────────────────────
     midi_min, midi_max = _MIDI_RANGE[instrument]
@@ -183,6 +193,7 @@ def analyze(
 
     # note_events: List[Tuple] 各要素は
     #   (start_time_s, end_time_s, pitch_midi, velocity, pitch_bends)
+    # basic-pitch の velocity は 0 固定のため音域フィルタのみ適用
     timed_notes: List[Tuple[float, int]] = [
         (float(ev[0]), int(ev[2]))
         for ev in note_events
@@ -192,9 +203,11 @@ def analyze(
 
     # モノフォニック化: ベースは単音楽器なので近傍ノートを間引く
     # 倍音補正を先に行い、その後モノフォニック化する
+    # window = 16分音符の半分 (BPM連動) — 近すぎるノートを基音に集約
     if instrument == "bass":
+        subdiv_sec = 60.0 / bpm / 4
         timed_notes = _correct_bass_octaves(timed_notes, y, sr, midi_min)
-        timed_notes = _mono_filter(timed_notes, window_sec=0.08)
+        timed_notes = _mono_filter(timed_notes, window_sec=subdiv_sec * 0.5)
 
     if not timed_notes:
         return TabResult(

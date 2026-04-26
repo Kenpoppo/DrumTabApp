@@ -37,7 +37,11 @@ Spotify「Basic Pitch」ニューラルネットワークを用いた高精度�
 | 楽器 | `onset_threshold` | `frame_threshold` | `minimum_note_length` | 理由 |
 |---|---|---|---|---|
 | guitar | `0.50` | `0.30` | `58` ms | 標準的な検出感度 |
-| bass | `0.35` | `0.25` | `50` ms | 低域(58 Hz以下)の基音検出向上のため閾値を下げる |
+| bass | `0.35` | `0.25` | `_BP_PARAMS` 未使用 | 低域(58 Hz以下)の基音検出向上のため閾値を低く設定 |
+
+> **bass の minimum_note_length は BPM 連動**: `max(80, int(16分音符ms × 0.83))`  
+> BPM=123 時: 0.83 × 121ms = **101ms** を自動設定。  
+> Spleeter 倍音補正の源音符 (Bb2 等) が ~100ms と短いため、フルの 16th より短い係数を使用。
 
 ---
 
@@ -49,6 +53,9 @@ librosa.load(sr=None, mono=True, float32)
 _estimate_bpm(y, sr, audio_path)
   → drums.wav が同ディレクトリにあれば drums.wav でBPM推定
   → なければ複数 start_bpm 候補でフォールバック
+  ↓
+[bass only] BPM連動 minimum_note_length 算出
+  → max(80, int(16th_note_ms × 0.83))  BPM=123時: 101ms
   ↓
 basic_pitch.inference.predict(audio_path, onset_threshold, frame_threshold, minimum_note_length,
                                minimum_frequency=Hz(midi_min), maximum_frequency=Hz(midi_max))
@@ -116,3 +123,4 @@ Spleeter の bass.wav では低域の基音エネルギーが失われ、2nd har
 |---|---|
 | 2025-07-xx | 初版。basic-pitch ニューラルネットワーク統合 |
 | 2025-07-xx | ベースTAB精度改善: `_BP_PARAMS` 楽器別デフォルト追加, `_correct_bass_octaves()` 実装 (Spleeter倍音補正), BPM推定を drums.wav 優先方式に変更, `_mono_filter` 適用 |
+| 2025-07-xx | BPM連動 minimum_note_length (× 0.83係数) 追加, `_mono_filter` window を BPM連動 (subdiv × 0.5) に変更, velocity は常に0のためフィルタ無効化 |

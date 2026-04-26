@@ -18,10 +18,13 @@ core/player.py
 """
 from __future__ import annotations
 
+import logging
 import threading
 from typing import Optional
 
 import numpy as np
+
+log = logging.getLogger(__name__)
 
 SR        = 22050   # サンプリングレート
 BLOCKSIZE = 2048    # sounddevice バッファサイズ
@@ -63,8 +66,10 @@ class AudioPlayer:
     def load(self, path: str) -> None:
         """音声ファイルをロードし現在の速度・ピッチ設定で前処理する。ブロッキング。"""
         import librosa as _lr
+        log.info("load: %s", path)
         self._stop_stream()
         y, sr = _lr.load(path, sr=SR, mono=True, dtype=np.float32)
+        log.debug("load done: samples=%d sr=%d dur=%.1fs", len(y), sr, len(y)/sr)
         with self._lock:
             self._raw     = y
             self._sr      = sr
@@ -84,6 +89,7 @@ class AudioPlayer:
         import librosa as _lr
         if self._raw is None:
             return
+        log.debug("rebuild: speed=%.2f pitch=%+d", self._speed, self._pitch)
         y = self._raw.copy()
         if self._pitch != 0:
             y = _lr.effects.pitch_shift(y, sr=self._sr, n_steps=float(self._pitch))
@@ -95,6 +101,7 @@ class AudioPlayer:
                 ratio = len(proc) / len(self._proc)
                 self._pos = min(int(self._pos * ratio), len(proc) - 1)
             self._proc = proc
+        log.debug("rebuild done: proc_frames=%d dur=%.1fs", len(proc), len(proc)/self._sr)
 
     # ── 再生制御 ───────────────────────────────────────────────────────────────
 
@@ -102,6 +109,7 @@ class AudioPlayer:
         """再生開始。"""
         import sounddevice as _sd
         if self._proc is None:
+            log.warning("play() called but nothing loaded")
             return
         self._stop_stream()
         with self._lock:
@@ -113,16 +121,19 @@ class AudioPlayer:
             blocksize=BLOCKSIZE, callback=self._cb,
         )
         self._stream.start()
+        log.info("play: pos=%.1fs dur=%.1fs", self._pos/self._sr, self.duration_sec)
 
     def pause(self) -> None:
         with self._lock:
             self._playing = False
+        log.info("pause: pos=%.1fs", self.position_sec)
 
     def stop(self) -> None:
         self._stop_stream()
         with self._lock:
             self._playing = False
             self._pos = 0
+        log.info("stop")
 
     def seek(self, sec: float) -> None:
         with self._lock:
@@ -144,10 +155,12 @@ class AudioPlayer:
         with self._lock:
             self._loop_a = int(a_sec * self._sr)
             self._loop_b = int(b_sec * self._sr)
+        log.info("loop set: A=%.2fs B=%.2fs", a_sec, b_sec)
 
     def clear_loop(self) -> None:
         with self._lock:
             self._loop_a = self._loop_b = None
+        log.info("loop cleared")
 
     # ── プロパティ ─────────────────────────────────────────────────────────────
 
@@ -184,8 +197,9 @@ class AudioPlayer:
             try:
                 s.stop()
                 s.close()
-            except Exception:
-                pass
+                log.debug("stream stopped")
+            except Exception as exc:
+                log.warning("stream stop error: %s", exc)
 
     def _cb(self, outdata: np.ndarray, frames: int, time_info, status) -> None:
         """sounddevice OutputStream コールバック（オーディオスレッドで実行）。"""

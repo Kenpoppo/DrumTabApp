@@ -14,6 +14,7 @@ ui/main_window.py
 """
 from __future__ import annotations
 
+import logging
 import os
 from typing import Callable, Optional
 
@@ -48,6 +49,8 @@ def _fmt_time(sec: float) -> str:
 _ROOT_DIR     = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _DOWNLOADS    = os.path.join(_ROOT_DIR, "downloads")
 
+log = logging.getLogger(__name__)
+
 
 # ── バックグラウンドワーカー ────────────────────────────────────────────────────
 class _Worker(QThread):
@@ -65,6 +68,8 @@ class _Worker(QThread):
         try:
             self.finished.emit(self._fn())
         except Exception as exc:
+            logging.getLogger(__name__).error(
+                "Worker error: %s: %s", type(exc).__name__, exc, exc_info=True)
             self.error.emit(f"{type(exc).__name__}: {exc}")
 
 
@@ -74,6 +79,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._selected_file: str | None = None
         self._worker: _Worker | None = None
+        self._player_worker: _Worker | None = None  # プレイヤー用ワーカー（GC防止用に保持）
         # 解析結果を保持
         self._last_drum_result   = None
         self._last_bass_result   = None
@@ -178,6 +184,7 @@ class MainWindow(QMainWindow):
             self._file_label.setStyleSheet("color: black; padding-left: 6px;")
             self._set_analysis_enabled(True)
             self.statusBar().showMessage(f"選択: {os.path.basename(path)}")
+            log.info("file selected: %s", path)
             # プレイヤーに音声をロード
             self._player.stop()
             self._play_btn.setText("▶")
@@ -211,6 +218,7 @@ class MainWindow(QMainWindow):
             self._last_guitar_result = tab_result
             return tab_result.tab_text
         label = "Guitar TAB 生成 (高精度)" if use_hq else "Guitar TAB 生成"
+        log.info("run_guitar: hq=%s path=%s", use_hq, self._selected_file)
         self._launch(label, _task)
 
     def _run_bass(self) -> None:
@@ -236,6 +244,7 @@ class MainWindow(QMainWindow):
             self._last_bass_result = tab_result
             return tab_result.tab_text
         label = "Bass TAB 生成 (高精度)" if use_hq else "Bass TAB 生成"
+        log.info("run_bass: hq=%s path=%s", use_hq, self._selected_file)
         self._launch(label, _task)
 
     def _run_drum(self) -> None:
@@ -252,6 +261,7 @@ class MainWindow(QMainWindow):
                 key=chord_result.key,
             )
         self._launch("Drum 解析", _task)
+        log.info("run_drum: path=%s", self._selected_file)
 
     # ── 汎用バックグラウンド実行 ────────────────────────────────────────────────
     def _launch(self, label: str, fn: Callable[[], str]) -> None:
@@ -265,6 +275,7 @@ class MainWindow(QMainWindow):
         self._set_analysis_enabled(False)
         self._display.setPlainText(f"{label} を実行中…\n（解析には数秒〜数十秒かかることがあります）")
         self.statusBar().showMessage(f"{label} 中…")
+        log.info("launch: [%s]", label)
 
         self._worker = _Worker(fn)
         self._worker.finished.connect(self._on_done)
@@ -273,6 +284,7 @@ class MainWindow(QMainWindow):
 
     # ── ワーカーコールバック ────────────────────────────────────────────────────
     def _on_done(self, result: str) -> None:
+        log.info("analysis done: %d chars", len(result))
         self._display.setPlainText(result)
         self._set_analysis_enabled(True)
         # 解析結果があれば MIDI / GP 書き出しボタンを有効化
@@ -288,6 +300,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("完了")
 
     def _on_error(self, message: str) -> None:
+        log.error("analysis error: %s", message)
         self._display.setPlainText(f"エラーが発生しました:\n\n{message}")
         self._set_analysis_enabled(True)
         self.statusBar().showMessage("エラー発生")
@@ -507,13 +520,15 @@ class MainWindow(QMainWindow):
             self._player.load(path)
             return str(self._player.duration_sec)
 
-        w = _Worker(_task)
-        w.finished.connect(self._on_audio_loaded)
-        w.error.connect(lambda msg: self.statusBar().showMessage(f"読み込みエラー: {msg}"))
-        w.start()
+        self._player_worker = _Worker(_task)
+        self._player_worker.finished.connect(self._on_audio_loaded)
+        self._player_worker.error.connect(
+            lambda msg: self.statusBar().showMessage(f"読み込みエラー: {msg}"))
+        self._player_worker.start()
 
     def _on_audio_loaded(self, dur_str: str) -> None:
         dur = float(dur_str)
+        log.info("audio loaded: dur=%.1fs", dur)
         self._set_player_enabled(True)
         self._play_btn.setText("▶")
         self._time_lbl.setText(f"0:00 / {_fmt_time(dur)}")
@@ -592,10 +607,11 @@ class MainWindow(QMainWindow):
             self._player.rebuild()
             return "done"
 
-        w = _Worker(_task)
-        w.finished.connect(self._on_fx_ready)
-        w.error.connect(lambda msg: self.statusBar().showMessage(f"エフェクトエラー: {msg}"))
-        w.start()
+        self._player_worker = _Worker(_task)
+        self._player_worker.finished.connect(self._on_fx_ready)
+        self._player_worker.error.connect(
+            lambda msg: self.statusBar().showMessage(f"エフェクトエラー: {msg}"))
+        self._player_worker.start()
 
     def _on_fx_ready(self, _: str) -> None:
         self._set_player_enabled(True)
@@ -664,3 +680,18 @@ class MainWindow(QMainWindow):
                   self._loop_a_btn, self._loop_b_btn, self._loop_clr_btn,
                   self._metro_btn):
             w.setEnabled(enabled)
+
+    # ── ウィンドウクローズ ─────────────────────────────────────────────────────────
+
+    def closeEvent(self, event) -> None:  # type: ignore[override]
+        """ウィンドウを閉じる前にプレイヤー・タイマーをクリーンアップする。"""
+        log.info("closeEvent: stopping player and timers")
+        self._pos_timer.stop()
+        self._metro_timer.stop()
+        self._player.stop()
+        # 実行中ワーカーを待機成功が必須なら待機する
+        for w in (self._worker, self._player_worker):
+            if w is not None and w.isRunning():
+                w.quit()
+                w.wait(2000)
+        event.accept()

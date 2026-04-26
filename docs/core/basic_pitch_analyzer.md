@@ -37,7 +37,7 @@ Spotify「Basic Pitch」ニューラルネットワークを用いた高精度�
 | 楽器 | `onset_threshold` | `frame_threshold` | `minimum_note_length` | 理由 |
 |---|---|---|---|---|
 | guitar | `0.50` | `0.30` | `58` ms | 標準的な検出感度 |
-| bass | `0.35` | `0.25` | `_BP_PARAMS` 未使用 | 低域(58 Hz以下)の基音検出向上のため閾値を低く設定 |
+| bass | `0.25` | `0.18` | `_BP_PARAMS` 未使用 | 低域(49-58 Hz)の G1/A1/Bb1 基音の recall 向上のため閾値を大幅に低く設定 |
 
 > **bass の minimum_note_length は BPM 連動**: `max(80, int(16分音符ms × 0.83))`  
 > BPM=123 時: 0.83 × 121ms = **101ms** を自動設定。  
@@ -58,15 +58,23 @@ _estimate_bpm(y, sr, audio_path)
   → max(80, int(16th_note_ms × 0.83))  BPM=123時: 101ms
   ↓
 basic_pitch.inference.predict(audio_path, onset_threshold, frame_threshold, minimum_note_length,
-                               minimum_frequency=Hz(midi_min), maximum_frequency=Hz(midi_max))
+                               minimum_frequency=30Hz(bass)/Hz(midi_min), maximum_frequency=Hz(midi_max))
   ↓
 音域フィルタ: midi_min <= midi <= midi_max のみ通過
   ↓
-[bass only] _correct_bass_octaves()
+[bass only] _merge_sustained_notes(gap_ms=100)
+  → 持続音を分割した複数 events を統合 (gap ≤ 100ms の同ピッチを結合)
+  ↓
+[bass only] _correct_bass_octaves(ratio_threshold=0.12, apply_above_midi=43)
   → Spleeter が低域の基音を落とした場合、倍音 → 基音にオクターブ補正
   ↓
-[bass only] _mono_filter(window_sec=0.08)
-  → ポリフォニー解消: 80ms 窓内の複数音符 → 最低音のみ残す
+[bass only] post-correction MIDI cap (m ≤ 48: C3 超えを除去)
+  ↓
+[bass only] _dedup_runs(min_gap_sec=beat_sec/2)
+  → 倍音補正後の重複除去: 8分音符未満間隔の同ピッチは最初のみ残す
+  ↓
+[bass only] _mono_filter(window_sec=subdiv_sec×0.5)
+  → ポリフォニー解消: 16分音符/2 窓内の複数音符 → 最低音のみ残す
   ↓
 _render_tab(timed_notes, instrument, bpm, chords, key)
   ↓
@@ -89,7 +97,7 @@ Spleeter の bass.wav では低域の基音エネルギーが失われ、2nd har
 4. `e_low / e_high >= 0.15` (基音エネルギーが倍音の15%以上) なら、1オクターブ下に修正
 
 **例**: Bb2(46, 116 Hz) 検出時 → Bb1(34, 58 Hz) の比率確認
-- e_high(116 Hz) = 4.75、e_low(58 Hz) = 0.87 → 0.87/4.75 = 0.18 ≥ 0.15 → Bb1 に修正 ✓
+- e_high(116 Hz) = 4.75、e_low(58 Hz) = 0.87 → 0.87/4.75 = 0.18 ≥ 0.12 → Bb1 に修正 ✓
 
 ---
 
@@ -108,10 +116,12 @@ Spleeter の bass.wav では低域の基音エネルギーが失われ、2nd har
 
 ## 7. 既知の制限
 
-- **Bb1 等の基音欠落**: Spleeter 5-stems で分離した bass.wav は 58 Hz 以下の基音が
-  弱くなる場合がある。`_correct_bass_octaves()` である程度補正するが完全ではない。
-- **イントロの検出感度**: 音量が小さい intro セクションで onset_threshold=0.35 だと
-  検出漏れが発生することがある。
+- **Spleeter 音源分離の限界**: Spleeter 5-stems で分離した bass.wav は高密度な繰り返し音符
+  (例: 16分音符 ×12 の F2 連打) で多くのノートが失われる。これは Spleeter の設計的制限。
+- **G1(49 Hz) の検出数不足**: basic-pitch CNN は G1 の onset を全数検出できない。
+  onset=0.25/frame=0.18 で recall は改善されるが GT の 50-60% に留まる。
+- **イントロの検出ゼロ**: 曲の冒頭 (m.1-9) は音量が小さく basic-pitch が onset を
+  検出できない。これは Spleeter + basic-pitch 構造的制限として許容する。
 - **key 検出精度**: `chord_analyzer.analyze()` のキー検出が相対調 (例: Gm vs Dm) を
   混同することがある。これは chord_analyzer 側の制限。
 
@@ -124,3 +134,4 @@ Spleeter の bass.wav では低域の基音エネルギーが失われ、2nd har
 | 2025-07-xx | 初版。basic-pitch ニューラルネットワーク統合 |
 | 2025-07-xx | ベースTAB精度改善: `_BP_PARAMS` 楽器別デフォルト追加, `_correct_bass_octaves()` 実装 (Spleeter倍音補正), BPM推定を drums.wav 優先方式に変更, `_mono_filter` 適用 |
 | 2025-07-xx | BPM連動 minimum_note_length (× 0.83係数) 追加, `_mono_filter` window を BPM連動 (subdiv × 0.5) に変更, velocity は常に0のためフィルタ無効化 |
+| 2025-07-xx | `_merge_sustained_notes(gap_ms=100)` 追加: D2/D3 の持続音再分割を統合; `_dedup_runs(beat_sec/2)` 追加: 倍音補正後の重複除去; `_correct_bass_octaves` ratio_threshold 0.15→0.12 で補正を積極化; post-correction MIDI cap (m≤48) 追加; minimum_frequency=30Hz でモデルコンテキスト拡張; bass onset/frame 閾値 0.35/0.25→0.25/0.18 で G1/Bb1 recall 向上 |

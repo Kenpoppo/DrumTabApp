@@ -50,8 +50,72 @@ warnings.filterwarnings("ignore", category=UserWarning)
 # ベースは低域(58 Hz付近)の基音を捉えるため onset/frame 閾値を低く設定する
 _BP_PARAMS = {
     "guitar": {"onset_threshold": 0.50, "frame_threshold": 0.30, "minimum_note_length": 58},
-    "bass":   {"onset_threshold": 0.35, "frame_threshold": 0.25, "minimum_note_length": 100},
+    "bass":   {"onset_threshold": 0.25, "frame_threshold": 0.18, "minimum_note_length": 100},
 }
+
+
+# ── 持続音の再分割を統合 ───────────────────────────────────────────────────────
+def _merge_sustained_notes(
+    note_events: List[Tuple[float, float, int]],  # (start, end, midi)
+    gap_ms: float = 30.0,
+) -> List[Tuple[float, float, int]]:
+    """
+    basic-pitch が同ピッチの持続音を複数の短い events に分割してしまう問題を修正する。
+
+    end ≈ 次の start (gap ≤ gap_ms) の同ピッチ events を1つにマージする。
+
+    例: D2 の (start=18.228, end=18.379), (start=18.379, end=18.506), ...
+        → (start=18.228, end=19.191) の 1 events に統合 ✓
+    """
+    if not note_events:
+        return note_events
+
+    # MIDI ごとにソートしてマージ
+    from collections import defaultdict
+    by_midi: dict = defaultdict(list)
+    for start, end, midi in note_events:
+        by_midi[midi].append((start, end))
+
+    merged: List[Tuple[float, float, int]] = []
+    for midi, segs in by_midi.items():
+        segs.sort()
+        cur_start, cur_end = segs[0]
+        for seg_start, seg_end in segs[1:]:
+            gap = (seg_start - cur_end) * 1000  # ms
+            if gap <= gap_ms:
+                cur_end = max(cur_end, seg_end)
+            else:
+                merged.append((cur_start, cur_end, midi))
+                cur_start, cur_end = seg_start, seg_end
+        merged.append((cur_start, cur_end, midi))
+
+    merged.sort(key=lambda x: x[0])
+    return merged
+
+
+
+# ── 同音連続除去 ───────────────────────────────────────────────────────────────
+def _dedup_runs(
+    notes: List[Tuple[float, int]],
+    min_gap_sec: float,
+) -> List[Tuple[float, int]]:
+    """
+    同ピッチが min_gap_sec 未満の間隔で連続する場合、最初のみ残す。
+
+    _correct_bass_octaves で D3→D2 補正した後に元の D2 と二重検出になる問題を解消。
+    min_gap_sec = 8分音符 にすることで:
+    - D2 の 92ms 重複 → 除去 ✓
+    - G1 の 243ms 繰り返し → 保持 ✓
+    """
+    if not notes:
+        return notes
+    result = [notes[0]]
+    for t, midi in notes[1:]:
+        prev_t, prev_midi = result[-1]
+        if midi == prev_midi and (t - prev_t) < min_gap_sec:
+            continue
+        result.append((t, midi))
+    return result
 
 
 # ── ベース倍音補正 ─────────────────────────────────────────────────────────────
@@ -62,7 +126,7 @@ def _correct_bass_octaves(
     midi_min: int,
     hop_length: int = 512,
     n_fft: int = 4096,
-    ratio_threshold: float = 0.15,
+    ratio_threshold: float = 0.12,
     apply_above_midi: int = 43,  # G2 以上のノートのみ補正対象
 ) -> List[Tuple[float, int]]:
     """
@@ -182,22 +246,36 @@ def analyze(
     # ── ニューラルネットワーク推論 ────────────────────────────────────────────
     midi_min, midi_max = _MIDI_RANGE[instrument]
 
+    # ベースは G1(49Hz) 等の超低域も検出するため minimum_frequency を 30Hz に設定
+    # (midi_min=28=E1=41Hz だが、モデルのコンテキスト取得のため広めに設定)
+    freq_min = 30.0 if instrument == "bass" else float(librosa.midi_to_hz(midi_min))
+
     _, _, note_events = predict(
         audio_path,
         onset_threshold=ot,
         frame_threshold=ft,
         minimum_note_length=ml,
-        minimum_frequency=librosa.midi_to_hz(midi_min),
+        minimum_frequency=freq_min,
         maximum_frequency=librosa.midi_to_hz(midi_max),
     )
 
     # note_events: List[Tuple] 各要素は
     #   (start_time_s, end_time_s, pitch_midi, velocity, pitch_bends)
     # basic-pitch の velocity は 0 固定のため音域フィルタのみ適用
-    timed_notes: List[Tuple[float, int]] = [
-        (float(ev[0]), int(ev[2]))
+    raw_events: List[Tuple[float, float, int]] = [
+        (float(ev[0]), float(ev[1]), int(ev[2]))
         for ev in note_events
         if midi_min <= ev[2] <= midi_max
+    ]
+
+    # 持続音の再分割を統合: basic-pitch が同ピッチの持続音を複数 events に分割する問題を修正
+    # gap_ms=100: D3 events の 58ms ギャップも吸収 (D3→D2 の二重検出を防ぐ)
+    if instrument == "bass":
+        raw_events = _merge_sustained_notes(raw_events, gap_ms=100.0)
+
+    timed_notes: List[Tuple[float, int]] = [
+        (start, midi)
+        for start, end, midi in raw_events
     ]
     timed_notes.sort(key=lambda x: x[0])
 
@@ -206,7 +284,13 @@ def analyze(
     # window = 16分音符の半分 (BPM連動) — 近すぎるノートを基音に集約
     if instrument == "bass":
         subdiv_sec = 60.0 / bpm / 4
+        beat_sec   = 60.0 / bpm
         timed_notes = _correct_bass_octaves(timed_notes, y, sr, midi_min)
+        # post-correction MIDI cap: C3(48)超えの高音は倍音誤検出とみなし除去
+        timed_notes = [(t, m) for t, m in timed_notes if m <= 48]
+        # 倍音補正後の重複除去: D3→D2補正で元の D2 と同音が近接した場合に間引く
+        # min_gap = 8分音符 (beat_sec/2): G1 の繰り返しは保持し D2 重複のみ除去
+        timed_notes = _dedup_runs(timed_notes, min_gap_sec=beat_sec / 2)
         timed_notes = _mono_filter(timed_notes, window_sec=subdiv_sec * 0.5)
 
     if not timed_notes:

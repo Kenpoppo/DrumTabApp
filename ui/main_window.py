@@ -15,7 +15,7 @@ ui/main_window.py
 from __future__ import annotations
 
 import os
-from typing import Callable
+from typing import Callable, Optional
 
 from PyQt5.QtCore import QThread, pyqtSignal
 from PyQt5.QtWidgets import (
@@ -60,6 +60,10 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._selected_file: str | None = None
         self._worker: _Worker | None = None
+        # 解析結果を保持（MIDI 書き出しに利用）
+        self._last_drum_result   = None
+        self._last_bass_result   = None
+        self._last_guitar_result = None
         self._setup_ui()
 
     # ── UI 構築 ─────────────────────────────────────────────────────────────────
@@ -78,11 +82,13 @@ class MainWindow(QMainWindow):
         self._bass_btn   = QPushButton("Bass TAB 生成")
         self._drum_btn   = QPushButton("Drum 解析")
         self._export_btn = QPushButton("PDF エクスポート")
+        self._midi_btn   = QPushButton("MIDI 書き出し")
 
         self._guitar_btn.clicked.connect(self._run_guitar)
         self._bass_btn.clicked.connect(self._run_bass)
         self._drum_btn.clicked.connect(self._run_drum)
         self._export_btn.clicked.connect(self._export_pdf)
+        self._midi_btn.clicked.connect(self._export_midi)
 
         # TAB 表示エリア（等幅フォント）
         self._display = QTextEdit()
@@ -96,7 +102,8 @@ class MainWindow(QMainWindow):
         file_row.addWidget(self._file_label, stretch=1)
 
         btn_row = QHBoxLayout()
-        for btn in (self._guitar_btn, self._bass_btn, self._drum_btn, self._export_btn):
+        for btn in (self._guitar_btn, self._bass_btn, self._drum_btn,
+                    self._export_btn, self._midi_btn):
             btn_row.addWidget(btn)
 
         layout = QVBoxLayout()
@@ -113,6 +120,7 @@ class MainWindow(QMainWindow):
 
         # 解析ボタンはファイル選択後に有効化
         self._set_analysis_enabled(False)
+        self._midi_btn.setEnabled(False)  # 解析完了後に有効化
 
     # ── ファイル選択 ────────────────────────────────────────────────────────────
     def _select_file(self) -> None:
@@ -134,13 +142,14 @@ class MainWindow(QMainWindow):
         path = self._selected_file
         def _task() -> str:
             ca = __import__("core.chord_analyzer", fromlist=["analyze"])
-            pa = __import__("core.pitch_analyzer", fromlist=["analyze"])
+            pa = __import__("core.pitch_analyzer",  fromlist=["analyze"])
             chord_result = ca.analyze(path)
             tab_result = pa.analyze(
                 path, "guitar",
                 chords=chord_result.chord_per_measure,
                 key=chord_result.key,
             )
+            self._last_guitar_result = tab_result  # MIDI 書き出し用に保持
             return tab_result.tab_text
         self._launch("Guitar TAB 生成", _task)
 
@@ -148,13 +157,14 @@ class MainWindow(QMainWindow):
         path = self._selected_file
         def _task() -> str:
             ca = __import__("core.chord_analyzer", fromlist=["analyze"])
-            pa = __import__("core.pitch_analyzer", fromlist=["analyze"])
+            pa = __import__("core.pitch_analyzer",  fromlist=["analyze"])
             chord_result = ca.analyze(path)
             tab_result = pa.analyze(
                 path, "bass",
                 chords=chord_result.chord_per_measure,
                 key=chord_result.key,
             )
+            self._last_bass_result = tab_result  # MIDI 書き出し用に保持
             return tab_result.tab_text
         self._launch("Bass TAB 生成", _task)
 
@@ -162,10 +172,12 @@ class MainWindow(QMainWindow):
         path = self._selected_file
         def _task() -> str:
             ca = __import__("core.chord_analyzer", fromlist=["analyze"])
-            da = __import__("core.drum_analyzer", fromlist=["analyze", "to_text"])
+            da = __import__("core.drum_analyzer",   fromlist=["analyze", "to_text"])
             chord_result = ca.analyze(path)
+            drum_result  = da.analyze(path)
+            self._last_drum_result = drum_result  # MIDI 書き出し用に保持
             return da.to_text(
-                da.analyze(path),
+                drum_result,
                 chords=chord_result.chord_per_measure,
                 key=chord_result.key,
             )
@@ -193,12 +205,50 @@ class MainWindow(QMainWindow):
     def _on_done(self, result: str) -> None:
         self._display.setPlainText(result)
         self._set_analysis_enabled(True)
+        # 解析結果があれば MIDI 書き出しボタンを有効化
+        if any([self._last_drum_result, self._last_bass_result, self._last_guitar_result]):
+            self._midi_btn.setEnabled(True)
         self.statusBar().showMessage("完了")
 
     def _on_error(self, message: str) -> None:
         self._display.setPlainText(f"エラーが発生しました:\n\n{message}")
         self._set_analysis_enabled(True)
         self.statusBar().showMessage("エラー発生")
+
+    # ── MIDI 書き出し ─────────────────────────────────────────────────────────
+    def _export_midi(self) -> None:
+        has_result = any([self._last_drum_result,
+                          self._last_bass_result,
+                          self._last_guitar_result])
+        if not has_result:
+            self.statusBar().showMessage("MIDI 書き出し: 先に解析を実行してください")
+            return
+
+        save_path, _ = QFileDialog.getSaveFileName(
+            self, "MIDI 保存先を選択", _DOWNLOADS, "MIDI Files (*.mid)"
+        )
+        if not save_path:
+            return
+
+        try:
+            from core.midi_exporter import export_midi
+            # BPM はドラム → ベース → ギターの優先順位で取得
+            bpm = (
+                self._last_drum_result.bpm   if self._last_drum_result   else
+                self._last_bass_result.bpm   if self._last_bass_result   else
+                self._last_guitar_result.bpm
+            )
+            result = export_midi(
+                save_path, bpm,
+                drum_result=self._last_drum_result,
+                bass_result=self._last_bass_result,
+                guitar_result=self._last_guitar_result,
+            )
+            self.statusBar().showMessage(
+                f"MIDI 書き出し完了: {result.n_tracks} トラック → {os.path.basename(save_path)}"
+            )
+        except Exception as exc:
+            self.statusBar().showMessage(f"MIDI 書き出しエラー: {exc}")
 
     # ── PDF エクスポート ────────────────────────────────────────────────────────
     def _export_pdf(self) -> None:
@@ -224,3 +274,7 @@ class MainWindow(QMainWindow):
     def _set_analysis_enabled(self, enabled: bool) -> None:
         for btn in (self._guitar_btn, self._bass_btn, self._drum_btn, self._export_btn):
             btn.setEnabled(enabled)
+        # MIDI ボタンは解析結果があるかどうかで連動
+        # （解析中は禁止、完了後は _on_done 内で再判定）
+        if not enabled:
+            self._midi_btn.setEnabled(False)

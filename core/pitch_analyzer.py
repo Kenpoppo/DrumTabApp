@@ -12,7 +12,7 @@ core/pitch_analyzer.py
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -52,10 +52,12 @@ _FMIN: Dict[str, float] = {
 @dataclass
 class TabResult:
     """analyze() の戻り値。"""
-    instrument: str
-    tab_text:   str
-    note_count: int
-    bpm:        float
+    instrument:  str
+    tab_text:    str
+    note_count:  int
+    bpm:         float
+    timed_notes: List[Tuple[float, int]] = field(default_factory=list)
+    """(time_sec, midi_note) のリスト。MIDI エクスポート等で利用。"""
 
 
 # ── 公開 API ───────────────────────────────────────────────────────────────────
@@ -139,7 +141,13 @@ def analyze(audio_path: str, instrument: str,
         )
 
     tab_text = _render_tab(timed_notes, instrument, bpm, chords=chords, key=key)
-    return TabResult(instrument=instrument, tab_text=tab_text, note_count=len(timed_notes), bpm=bpm)
+    return TabResult(
+        instrument=instrument,
+        tab_text=tab_text,
+        note_count=len(timed_notes),
+        bpm=bpm,
+        timed_notes=timed_notes,
+    )
 
 
 # ── 内部ヘルパー ───────────────────────────────────────────────────────────────

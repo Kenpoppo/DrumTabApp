@@ -198,6 +198,16 @@ def _render_tab(
         # コード行: 小節ごとにコード名を表示（chords が指定された場合）
         # 各小節の表示幅 = 16列×2文字 + 3ビート区切り = 35文字
         _MEASURE_DISP_WIDTH = _COLS_PER_MEASURE * 2 + (_COLS_PER_MEASURE // _SUBDIVISIONS - 1)
+
+        # 小節番号行: 行の先頭に何小節目かを表示
+        mnum_parts = []
+        for m in range(_MEASURES_PER_LINE):
+            midx = line_start // _COLS_PER_MEASURE + m
+            mnum = f"m.{midx + 1}"
+            mnum_parts.append(f"{mnum:<{_MEASURE_DISP_WIDTH}}")
+        mnum_row = "   |" + "||".join(mnum_parts) + "|"
+        output.append(mnum_row)
+
         if chords is not None:
             chord_parts = []
             for m in range(_MEASURES_PER_LINE):

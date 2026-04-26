@@ -229,6 +229,16 @@ def to_text(result: DrumAnalysisResult,
         # コード行: 小節ごとにコード名を表示（chords が指定された場合）
         # 各小節の表示幅 = cols_per_measure列 × 1文字 + 3ビート区切り = 19文字
         _MEASURE_DISP_WIDTH = cols_per_measure + (cols_per_measure // _DIV - 1)
+
+        # 小節番号行: 行の先頭に何小節目かを表示
+        mnum_parts = []
+        for m in range(measures_per_line):
+            midx = line_start // cols_per_measure + m
+            mnum = f"m.{midx + 1}"
+            mnum_parts.append(f"{mnum:<{_MEASURE_DISP_WIDTH}}")
+        mnum_row = "     |" + "||".join(mnum_parts) + "|"
+        output.append(mnum_row)
+
         if chords is not None:
             chord_parts = []
             for m in range(measures_per_line):

@@ -14,7 +14,7 @@ attack_time_analysis.py / drum_sheet_generator.py / (旧)drum_analyzer.py
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Optional
 
 import numpy as np
 import librosa
@@ -157,7 +157,9 @@ def analyze(audio_path: str) -> DrumAnalysisResult:
     )
 
 
-def to_text(result: DrumAnalysisResult) -> str:
+def to_text(result: DrumAnalysisResult,
+            chords: Optional[List[str]] = None,
+            key: str = "") -> str:
     """
     DrumAnalysisResult をドラムタブ譜テキストに変換する。
 
@@ -165,13 +167,8 @@ def to_text(result: DrumAnalysisResult) -> str:
       - 各列 = 1 つの 16 分音符
       - 行   = 楽器（HH / SN / BD）
       - x    = ヒット、- = 無音
-      - |    = 拍区切り（4 分音符）、各 2 小節で折り返し
-
-    例（2 小節分）:
-          |1---|2---|3---|4---|1---|2---|3---|4---|
-     HH  |x-x-|x-x-|x-x-|x-x-|x-x-|x-x-|x-x-|x-x-|
-     SN  |----|x---|----|x---|----|x---|----|x---|
-     BD  |x---|----|x---|----|x---|----|x---|----|
+      - |    = 拍区切り（4 分音符）、|| = 小節区切り、各 2 小節で折り返し
+      - chords 指定時: 各行の上に小節コード行を挿入
     """
     bpm = result.bpm
     _DIV = 4                                     # 1 拍あたりの分割数（16th note）
@@ -204,17 +201,19 @@ def to_text(result: DrumAnalysisResult) -> str:
 
     max_col = max(all_hits)
 
-    # ビートラベル: 1小節 = "1---2---3---4---" (16 文字)
-    _BEAT_LABEL = ["1", "-", "-", "-", "2", "-", "-", "-",
-                   "3", "-", "-", "-", "4", "-", "-", "-"]
+    # ビートラベル: 1小節 = ドラム標準カウント表記 "1e+a|2e+a|3e+a|4e+a" (16 文字)
+    # "1イーアンドアー" の第1・3拍目のサブ分割を直規
+    _BEAT_LABEL = ["1","e","+","a","2","e","+","a",
+                   "3","e","+","a","4","e","+","a"]
 
     header = (
-        "──────────────────────────────────────────────────────────\n"
+        "─" * 58 + "\n"
         f" Drum Tab  |  BPM: {bpm:.1f}"
-        f"  |  Kick:{result.kick_count}"
+        + (f"  |  Key: {key}" if key else "")
+        + f"  |  Kick:{result.kick_count}"
         f" / Snare:{result.snare_count}"
         f" / HH:{result.hihat_count}\n"
-        "──────────────────────────────────────────────────────────\n"
+        + "─" * 58 + "\n"
     )
     output = [header]
 
@@ -227,24 +226,42 @@ def to_text(result: DrumAnalysisResult) -> str:
     for line_start in range(0, max_col + cols_per_line, cols_per_line):
         line_end = line_start + cols_per_line
 
+        # コード行: 小節ごとにコード名を表示（chords が指定された場合）
+        # 各小節の表示幅 = cols_per_measure列 × 1文字 + 3ビート区切り = 19文字
+        _MEASURE_DISP_WIDTH = cols_per_measure + (cols_per_measure // _DIV - 1)
+        if chords is not None:
+            chord_parts = []
+            for m in range(measures_per_line):
+                midx = line_start // cols_per_measure + m
+                chord = chords[midx] if midx < len(chords) else ""
+                chord_parts.append(f"{chord:<{_MEASURE_DISP_WIDTH}}")
+            chord_row = "     |" + "||".join(chord_parts) + "|"
+            output.append(chord_row)
+
         # カウンター行（拍番号）
         cnt = "     |"
         for col in range(line_start, line_end):
             rel = col - line_start
-            if rel > 0 and rel % _DIV == 0:
+            if rel > 0 and rel % cols_per_measure == 0:
+                cnt += "||"
+            elif rel > 0 and rel % _DIV == 0:
                 cnt += "|"
             cnt += _BEAT_LABEL[rel % cols_per_measure]
         cnt += "|"
         output.append(cnt)
 
         # 楽器行（HH / SN / BD）
+        # 標準ASCIIドラムtab記号: HH=x(クローズドハイハット) / SN=o(スネアヒット) / BD=o(バスドラムヒット)
         for abbr, cols in rows_def:
+            hit_char = "x" if abbr == "HH" else "o"
             row = f" {abbr:<3} |"
             for col in range(line_start, line_end):
                 rel = col - line_start
-                if rel > 0 and rel % _DIV == 0:
+                if rel > 0 and rel % cols_per_measure == 0:
+                    row += "||"
+                elif rel > 0 and rel % _DIV == 0:
                     row += "|"
-                row += "x" if col in cols else "-"
+                row += hit_char if col in cols else "-"
             row += "|"
             output.append(row)
 

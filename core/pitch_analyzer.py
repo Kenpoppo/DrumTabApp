@@ -59,7 +59,9 @@ class TabResult:
 
 
 # ── 公開 API ───────────────────────────────────────────────────────────────────
-def analyze(audio_path: str, instrument: str) -> TabResult:
+def analyze(audio_path: str, instrument: str,
+            chords: Optional[List[str]] = None,
+            key: str = "") -> TabResult:
     """
     音源を解析してビートアライン TAB を生成する。
 
@@ -136,7 +138,7 @@ def analyze(audio_path: str, instrument: str) -> TabResult:
             bpm=bpm,
         )
 
-    tab_text = _render_tab(timed_notes, instrument, bpm)
+    tab_text = _render_tab(timed_notes, instrument, bpm, chords=chords, key=key)
     return TabResult(instrument=instrument, tab_text=tab_text, note_count=len(timed_notes), bpm=bpm)
 
 
@@ -145,12 +147,15 @@ def _render_tab(
     timed_notes: List[Tuple[float, int]],
     instrument:  str,
     bpm:         float,
+    chords:      Optional[List[str]] = None,
+    key:         str = "",
 ) -> str:
     """
     (time_sec, midi_note) リストをビートアライン TAB テキストに変換する。
 
-    各列 = 1 分割音価（デフォルト 8th note）
+    各列 = 1 分割音価（デフォルト 16th note）
     ビート区切りは '|'、小節区切りは '||' で表示。
+    chords が指定された場合、各行の上に小節コード行を挿入する。
     """
     tuning = _TUNINGS[instrument]
     names  = _STRING_NAMES[instrument]
@@ -181,13 +186,26 @@ def _render_tab(
         f"{'─' * 50}\n"
         f" {instrument.capitalize()} TAB"
         f"  |  BPM: {bpm:.1f}"
-        f"  |  Placed notes: {placed}\n"
+        + (f"  |  Key: {key}" if key else "")
+        + f"  |  Placed notes: {placed}\n"
         f"{'─' * 50}\n"
     )
     output = [header]
 
     for line_start in range(0, max_col + 1, cols_per_line):
         line_end = line_start + cols_per_line
+
+        # コード行: 小節ごとにコード名を表示（chords が指定された場合）
+        # 各小節の表示幅 = 16列×2文字 + 3ビート区切り = 35文字
+        _MEASURE_DISP_WIDTH = _COLS_PER_MEASURE * 2 + (_COLS_PER_MEASURE // _SUBDIVISIONS - 1)
+        if chords is not None:
+            chord_parts = []
+            for m in range(_MEASURES_PER_LINE):
+                midx = line_start // _COLS_PER_MEASURE + m
+                chord = chords[midx] if midx < len(chords) else ""
+                chord_parts.append(f"{chord:<{_MEASURE_DISP_WIDTH}}")
+            chord_row = "   |" + "||".join(chord_parts) + "|"  # prefix 4文字で弦行と列整列
+            output.append(chord_row)
 
         for si, name in enumerate(names):
             row = f" {name} |"
@@ -201,10 +219,10 @@ def _render_tab(
 
                 if col in col_map and col_map[col][0] == si:
                     fret = col_map[col][1]
-                    # 3文字固定幅: "-5-" (1桁) / "10-" (2桁) → 隣接ノートが混在しない
-                    row += f"-{fret}-" if fret < 10 else f"{fret}-"
+                    # 2文字固定幅: "-5" (1桁) / "10" (2桁) — 標準ASCII TAB記法
+                    row += f"-{fret}" if fret < 10 else f"{fret}"
                 else:
-                    row += "---"
+                    row += "--"
             row += "|"
             output.append(row)
 

@@ -132,25 +132,43 @@ class MainWindow(QMainWindow):
     # ── 解析ランチャー ──────────────────────────────────────────────────────────
     def _run_guitar(self) -> None:
         path = self._selected_file
-        self._launch(
-            "Guitar TAB 生成",
-            lambda: __import__("core.pitch_analyzer", fromlist=["analyze"])
-                    .analyze(path, "guitar").tab_text,
-        )
+        def _task() -> str:
+            ca = __import__("core.chord_analyzer", fromlist=["analyze"])
+            pa = __import__("core.pitch_analyzer", fromlist=["analyze"])
+            chord_result = ca.analyze(path)
+            tab_result = pa.analyze(
+                path, "guitar",
+                chords=chord_result.chord_per_measure,
+                key=chord_result.key,
+            )
+            return tab_result.tab_text
+        self._launch("Guitar TAB 生成", _task)
 
     def _run_bass(self) -> None:
         path = self._selected_file
-        self._launch(
-            "Bass TAB 生成",
-            lambda: __import__("core.pitch_analyzer", fromlist=["analyze"])
-                    .analyze(path, "bass").tab_text,
-        )
+        def _task() -> str:
+            ca = __import__("core.chord_analyzer", fromlist=["analyze"])
+            pa = __import__("core.pitch_analyzer", fromlist=["analyze"])
+            chord_result = ca.analyze(path)
+            tab_result = pa.analyze(
+                path, "bass",
+                chords=chord_result.chord_per_measure,
+                key=chord_result.key,
+            )
+            return tab_result.tab_text
+        self._launch("Bass TAB 生成", _task)
 
     def _run_drum(self) -> None:
         path = self._selected_file
         def _task() -> str:
-            mod = __import__("core.drum_analyzer", fromlist=["analyze", "to_text"])
-            return mod.to_text(mod.analyze(path))
+            ca = __import__("core.chord_analyzer", fromlist=["analyze"])
+            da = __import__("core.drum_analyzer", fromlist=["analyze", "to_text"])
+            chord_result = ca.analyze(path)
+            return da.to_text(
+                da.analyze(path),
+                chords=chord_result.chord_per_measure,
+                key=chord_result.key,
+            )
         self._launch("Drum 解析", _task)
 
     # ── 汎用バックグラウンド実行 ────────────────────────────────────────────────

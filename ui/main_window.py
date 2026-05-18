@@ -114,12 +114,17 @@ class MainWindow(QMainWindow):
         self._file_btn.clicked.connect(self._select_file)
 
         # 解析ボタン
+        self._all_btn    = QPushButton("⚡ 全解析")
         self._guitar_btn = QPushButton("Guitar TAB 生成")
         self._bass_btn   = QPushButton("Bass TAB 生成")
         self._drum_btn   = QPushButton("Drum 解析")
         self._export_btn = QPushButton("PDF エクスポート")
         self._midi_btn   = QPushButton("MIDI 書き出し")
         self._gp_btn     = QPushButton("🎸 GP書き出し (TuxGuitar)")
+        self._all_btn.setToolTip(
+            "Drum / Guitar / Bass を一括解析します。\n"
+            "音声ロード・HPSS・BPM 推定を1回に集約するため、個別実行より高速です。"
+        )
 
         # 高精度モード切替（basic-pitch 神経網 vs piptrack DSP）
         self._hq_check = QCheckBox("🧠 高精度モード (basic-pitch)")
@@ -128,6 +133,7 @@ class MainWindow(QMainWindow):
             "精度が大幅に向上しますが、処理に数十秒かかる場合があります。"
         )
 
+        self._all_btn.clicked.connect(self._run_all)
         self._guitar_btn.clicked.connect(self._run_guitar)
         self._bass_btn.clicked.connect(self._run_bass)
         self._drum_btn.clicked.connect(self._run_drum)
@@ -147,7 +153,7 @@ class MainWindow(QMainWindow):
         file_row.addWidget(self._file_label, stretch=1)
 
         btn_row = QHBoxLayout()
-        for btn in (self._guitar_btn, self._bass_btn, self._drum_btn,
+        for btn in (self._all_btn, self._guitar_btn, self._bass_btn, self._drum_btn,
                     self._export_btn, self._midi_btn, self._gp_btn):
             btn_row.addWidget(btn)
         btn_row.addWidget(self._hq_check)
@@ -185,6 +191,12 @@ class MainWindow(QMainWindow):
             self._set_analysis_enabled(True)
             self.statusBar().showMessage(f"選択: {os.path.basename(path)}")
             log.info("file selected: %s", path)
+            # 新ファイルに切り替え: 音声キャッシュをクリア
+            try:
+                from core import _audio_cache
+                _audio_cache.clear()
+            except Exception:
+                pass
             # プレイヤーに音声をロード
             self._player.stop()
             self._play_btn.setText("▶")
@@ -195,26 +207,71 @@ class MainWindow(QMainWindow):
             self._load_audio()
 
     # ── 解析ランチャー ──────────────────────────────────────────────────────────
-    def _run_guitar(self) -> None:
-        path = self._selected_file
+    def _run_all(self) -> None:
+        """Drum / Guitar / Bass を1セッションで一括解析する（音声ロード・HPSS・BPM は1回）。"""
+        path   = self._selected_file
         use_hq = self._hq_check.isChecked()
         def _task() -> str:
+            from core.analysis_session import AnalysisSession
+            session = AnalysisSession(path)
+
             ca = __import__("core.chord_analyzer", fromlist=["analyze"])
-            chord_result = ca.analyze(path)
+            da = __import__("core.drum_analyzer",   fromlist=["analyze", "to_text"])
+            chord_result = ca.analyze(session)
+            drum_result  = da.analyze(session)
+            self._last_drum_result = drum_result
+
             if use_hq:
                 bp = __import__("core.basic_pitch_analyzer", fromlist=["analyze"])
-                tab_result = bp.analyze(
-                    path, "guitar",
-                    chords=chord_result.chord_per_measure,
-                    key=chord_result.key,
-                )
+                guitar_result = bp.analyze(session, "guitar",
+                                           chords=chord_result.chord_per_measure,
+                                           key=chord_result.key)
+                bass_result   = bp.analyze(session, "bass",
+                                           chords=chord_result.chord_per_measure,
+                                           key=chord_result.key)
             else:
                 pa = __import__("core.pitch_analyzer", fromlist=["analyze"])
-                tab_result = pa.analyze(
-                    path, "guitar",
-                    chords=chord_result.chord_per_measure,
-                    key=chord_result.key,
-                )
+                guitar_result = pa.analyze(session, "guitar",
+                                           chords=chord_result.chord_per_measure,
+                                           key=chord_result.key)
+                bass_result   = pa.analyze(session, "bass",
+                                           chords=chord_result.chord_per_measure,
+                                           key=chord_result.key)
+
+            self._last_guitar_result = guitar_result
+            self._last_bass_result   = bass_result
+
+            sep = "=" * 58
+            drum_text   = da.to_text(drum_result,
+                                     chords=chord_result.chord_per_measure,
+                                     key=chord_result.key)
+            return (
+                f"{sep}\n DRUM TAB\n{sep}\n{drum_text}\n\n"
+                f"{sep}\n GUITAR TAB\n{sep}\n{guitar_result.tab_text}\n\n"
+                f"{sep}\n BASS TAB\n{sep}\n{bass_result.tab_text}"
+            )
+        label = "全解析 (高精度)" if use_hq else "全解析"
+        log.info("run_all: hq=%s path=%s", use_hq, self._selected_file)
+        self._launch(label, _task)
+
+    def _run_guitar(self) -> None:
+        path   = self._selected_file
+        use_hq = self._hq_check.isChecked()
+        def _task() -> str:
+            from core.analysis_session import AnalysisSession
+            session      = AnalysisSession(path)
+            ca           = __import__("core.chord_analyzer", fromlist=["analyze"])
+            chord_result = ca.analyze(session)
+            if use_hq:
+                bp = __import__("core.basic_pitch_analyzer", fromlist=["analyze"])
+                tab_result = bp.analyze(session, "guitar",
+                                        chords=chord_result.chord_per_measure,
+                                        key=chord_result.key)
+            else:
+                pa = __import__("core.pitch_analyzer", fromlist=["analyze"])
+                tab_result = pa.analyze(session, "guitar",
+                                        chords=chord_result.chord_per_measure,
+                                        key=chord_result.key)
             self._last_guitar_result = tab_result
             return tab_result.tab_text
         label = "Guitar TAB 生成 (高精度)" if use_hq else "Guitar TAB 生成"
@@ -222,25 +279,23 @@ class MainWindow(QMainWindow):
         self._launch(label, _task)
 
     def _run_bass(self) -> None:
-        path = self._selected_file
+        path   = self._selected_file
         use_hq = self._hq_check.isChecked()
         def _task() -> str:
-            ca = __import__("core.chord_analyzer", fromlist=["analyze"])
-            chord_result = ca.analyze(path)
+            from core.analysis_session import AnalysisSession
+            session      = AnalysisSession(path)
+            ca           = __import__("core.chord_analyzer", fromlist=["analyze"])
+            chord_result = ca.analyze(session)
             if use_hq:
                 bp = __import__("core.basic_pitch_analyzer", fromlist=["analyze"])
-                tab_result = bp.analyze(
-                    path, "bass",
-                    chords=chord_result.chord_per_measure,
-                    key=chord_result.key,
-                )
+                tab_result = bp.analyze(session, "bass",
+                                        chords=chord_result.chord_per_measure,
+                                        key=chord_result.key)
             else:
                 pa = __import__("core.pitch_analyzer", fromlist=["analyze"])
-                tab_result = pa.analyze(
-                    path, "bass",
-                    chords=chord_result.chord_per_measure,
-                    key=chord_result.key,
-                )
+                tab_result = pa.analyze(session, "bass",
+                                        chords=chord_result.chord_per_measure,
+                                        key=chord_result.key)
             self._last_bass_result = tab_result
             return tab_result.tab_text
         label = "Bass TAB 生成 (高精度)" if use_hq else "Bass TAB 生成"
@@ -250,18 +305,18 @@ class MainWindow(QMainWindow):
     def _run_drum(self) -> None:
         path = self._selected_file
         def _task() -> str:
-            ca = __import__("core.chord_analyzer", fromlist=["analyze"])
-            da = __import__("core.drum_analyzer",   fromlist=["analyze", "to_text"])
-            chord_result = ca.analyze(path)
-            drum_result  = da.analyze(path)
-            self._last_drum_result = drum_result  # MIDI 書き出し用に保持
-            return da.to_text(
-                drum_result,
-                chords=chord_result.chord_per_measure,
-                key=chord_result.key,
-            )
-        self._launch("Drum 解析", _task)
+            from core.analysis_session import AnalysisSession
+            session      = AnalysisSession(path)
+            ca           = __import__("core.chord_analyzer", fromlist=["analyze"])
+            da           = __import__("core.drum_analyzer",   fromlist=["analyze", "to_text"])
+            chord_result = ca.analyze(session)
+            drum_result  = da.analyze(session)
+            self._last_drum_result = drum_result
+            return da.to_text(drum_result,
+                              chords=chord_result.chord_per_measure,
+                              key=chord_result.key)
         log.info("run_drum: path=%s", self._selected_file)
+        self._launch("Drum 解析", _task)
 
     # ── 汎用バックグラウンド実行 ────────────────────────────────────────────────
     def _launch(self, label: str, fn: Callable[[], str]) -> None:
@@ -403,7 +458,8 @@ class MainWindow(QMainWindow):
 
     # ── ヘルパー ────────────────────────────────────────────────────────────────
     def _set_analysis_enabled(self, enabled: bool) -> None:
-        for btn in (self._guitar_btn, self._bass_btn, self._drum_btn, self._export_btn):
+        for btn in (self._all_btn, self._guitar_btn, self._bass_btn,
+                    self._drum_btn, self._export_btn):
             btn.setEnabled(enabled)
         # MIDI / GP ボタンは解析結果があるかどうかで連動
         # （解析中は禁止、完了後は _on_done 内で再判定）

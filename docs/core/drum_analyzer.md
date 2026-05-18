@@ -19,13 +19,16 @@
 
 ## 2. 公開 API
 
-### `analyze(audio_path: str) -> DrumAnalysisResult`
+### `analyze(source: Union[str, AnalysisSession]) -> DrumAnalysisResult`
 
 音源ファイルを解析して `DrumAnalysisResult` を返す。
 
-| 引数 | 型 | 説明 |
-|---|---|---|
-| `audio_path` | `str` | 解析対象の音源ファイルパス（mp3 / wav） |
+| 引数     | 型                             | 説明                                           |
+| -------- | ------------------------------ | ---------------------------------------------- |
+| `source` | `str` または `AnalysisSession` | 解析対象の音源ファイルパス、または共有セッション |
+
+`str` を渡した場合は内部で `AnalysisSession(source)` を生成する（後方互換）。  
+`AnalysisSession` を渡すと `audio_22k / hpss_22k / bpm` を他モジュールと共有してゼロコストで再利用する。
 
 **戻り値**: `DrumAnalysisResult`
 
@@ -87,15 +90,19 @@ class DrumAnalysisResult:
 ## 4. 処理フロー
 
 ```
-librosa.load(sr=22050, mono=True, float32)
+AnalysisSession.audio_22k   → y, sr  (22050 Hz, joblib ディスクキャッシュ)
   ↓
-librosa.effects.hpss(margin=3.0)  → y_perc（打楽器成分）
+AnalysisSession.hpss_22k    → y_perc （打楽器成分、キャッシュ共有）
   ↓
-beat_track(y_perc) → BPM
+AnalysisSession.bpm         → BPM   （drums.wav 優先、キャッシュ共有）
   ↓
-onset_detect(y_perc, backtrack=True, delta=0.05, wait=5) → onset_frames
+onset_strength(y_perc) once → onset_env_perc
   ↓
-_classify_hit(y_full, frame) × N  → labels[]
+onset_detect(onset_envelope=onset_env_perc, delta=0.05, wait=5) → onset_frames
+  ↓
+librosa.stft(y_full, n_fft=2048) ** 2                           → S（1回のみ計算）
+  ↓
+_classify_hits_batch(S, onset_frames)                           → labels[]（numpy 一括）
   ↓
 DrumAnalysisResult(...)
   ↓
@@ -104,17 +111,20 @@ to_text() → ドラムタブ譜テキスト
 
 ---
 
-## 5. ドラム種別分類ロジック (`_classify_hit`)
+## 5. ドラム種別分類ロジック (`_classify_hits_batch`)
+
+STFT パワースペクトル `S` から全オンセットを **numpy ベクトル演算で一括分類** する。
+旧 `_classify_hit()` (per-onset FFT ループ) を置き換え、数百回の個別 FFT を排除。
 
 | 特徴量 | 計算方法 |
 |---|---|
-| `centroid` | スペクトル重心 Hz |
-| `low_r` | 20–200 Hz のパワー比 |
-| `high_r` | 5 kHz+ のパワー比 |
+| `centroid` | スペクトル重心 Hz (`_FREQS_DRUM[:, None] * powers).sum(axis=0) / total`) |
+| `low_r` | 20–200 Hz のパワー比 (`powers[_LO_MASK].sum(axis=0) / total`) |
+| `high_r` | 5 kHz+ のパワー比 (`powers[_HI_MASK].sum(axis=0) / total`) |
 
-**判定ルール（優先度順）:**
+**判定ルール（優先度順、ベクトル演算）:**
 
-1. RMS < 1e-4 → **Unknown**（無音ウィンドウをスキップ）
+1. `rms_proxy = sqrt(total / N_FFT) < 1e-4` → **Unknown**（無音フレームを除外）
 2. `centroid > 5000 Hz` または `centroid > 4000 Hz` と `high_r > 0.20` → **Hi-Hat**
 3. `centroid < 1500 Hz` または `centroid < 2500 Hz` と `low_r > 0.45` → **Kick**
 4. それ以外 → **Snare**
@@ -131,6 +141,9 @@ to_text() → ドラムタブ譜テキスト
 | `SR` | `22_050` | リサンプリングレート |
 | `HOP_LENGTH` | `512` | STFTホップ長 |
 | `N_FFT` | `2_048` | FFT窓サイズ |
+| `_FREQS_DRUM` | `rfftfreq(N_FFT, 1/SR)` | モジュール初期化時1回計算・全分類で共用 |
+| `_LO_MASK` | `freqs ∈ [20, 200) Hz` | 低域パワー比マスク（Kick 判定用） |
+| `_HI_MASK` | `freqs ≥ 5000 Hz` | 高域パワー比マスク（Hi-Hat 判定用） |
 | `onset_detect.delta` | `0.05` | オンセット検知感度（弱いHi-Hatも捕捉） |
 | `onset_detect.wait` | `5` | 最小フレーム間隔（16分音符Hi-Hat検出用） |
 
@@ -149,5 +162,8 @@ to_text() → ドラムタブ譜テキスト
 
 | 日付 | 変更内容 |
 |---|---|
-| 2026-04-26 | 初版。HPSS + 3特徴量分類 + データクラス戻り値 || 2026-04-27 | ブラッシュアップ: `wait=10→5` (Hi-Hatインターバル対応), `delta=0.07→0.05` (感度向上), 分類閾値を実データ診断結果に基づき再設計 (Hi-Hat: 13→134, 総検出: 268→480) |
+| 2026-04-26 | 初版。HPSS + 3特徴量分類 + データクラス戻り値 |
+| 2026-04-27 | ブラッシュアップ: `wait=10→5` (Hi-Hatインターバル対応), `delta=0.07→0.05` (感度向上), 分類閾値を実データ診断結果に基づき再設計 (Hi-Hat: 13→134, 総検出: 268→480) |
 | 2026-04-27 | `to_text()` をサマリーテキストからドラムタブ譜形式（16分音符グリッド、HH/SN/BD行）に全面書き換え |
+| 2026-04-28 | 性能改善: `onset_strength` を1回だけ計算し `beat_track` / `onset_detect` 両方に渡すよう変更。`_classify_hit()` を廃止し `_classify_hits_batch()` に置換（per-onset FFT ループ → STFT 1 回 + numpy 一括分類）。`_FREQS_DRUM` / `_LO_MASK` / `_HI_MASK` をモジュール定数として初期化時に1回だけ計算 |
+| 2026-05-13 | `analyze(audio_path: str)` → `analyze(source: Union[str, AnalysisSession])` に変更。`librosa.load` + `hpss` + `beat_track` を `AnalysisSession.audio_22k` / `.hpss_22k` / `.bpm` で代替し、全モジュール間でゼロコスト共有を実現 |

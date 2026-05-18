@@ -14,14 +14,17 @@
 
 ## 2. 公開 API
 
-### `analyze(audio_path: str, instrument: str) -> TabResult`
+### `analyze(source: Union[str, AnalysisSession], instrument: str) -> TabResult`
 
 | 引数 | 型 | 説明 |
-|---|---|---|
-| `audio_path` | `str` | 解析対象の音源ファイルパス |
+| --- | --- | --- |
+| `source` | `str` または `AnalysisSession` | 解析対象ファイルパス、または共有セッション |
 | `instrument` | `str` | `"guitar"` または `"bass"` |
 | `chords` | `list[str] \| None` | 小節別コードリスト（省略可） |
-| `key` | `str` | キー文字列（空文字列で指定展算展可） |
+| `key` | `str` | キー文字列（省略可） |
+
+`str` を渡した場合は内部で `AnalysisSession(source)` を生成する（後方互換）。  
+`AnalysisSession` を渡すと `audio_native / hpss_native / bpm` を他モジュールと共有してゼロコストで再利用する。
 
 **TAB スロット幅**: 2 文字固定（標準 ASCII TAB 形式）
 - 1 桁フレット (0–9): `"-5"` 形式
@@ -58,17 +61,20 @@ class TabResult:
 ## 4. 処理フロー
 
 ```
-librosa.load(sr=None, mono=True, float32)
+AnalysisSession.audio_native → y, sr  (joblib ディスクキャッシュ)
   ↓
-librosa.effects.hpss(margin=3.0)  → y_harm（倍音成分）
+AnalysisSession.hpss_native  → y_harm（倍音成分、キャッシュ共有）
   ↓
-beat_track(y_full) → BPM / 分割グリッド (subdiv_sec)
+AnalysisSession.bpm          → BPM（drums.wav 優先、キャッシュ共有）
   ↓
-piptrack(y_harm, hop_length=512, fmin=_FMIN[instrument])  → pitches, magnitudes
+piptrack(y_harm, hop_length=512, fmin=_FMIN[instrument]) → pitches, magnitudes
   ↓
 適応閾値: np.percentile(magnitudes[magnitudes>0], 80)
   ↓
-フィルタ: mag >= mag_threshold & pitch > 0 & MIDI 音域内 & 連続同一音除去
+numpy ベクトル演算で一括フィルタ（Python ループを排除）:
+  magnitudes.argmax(axis=0) → best_bin[]
+  mask: mag >= threshold & pitch > 0 & MIDI 音域内
+  dedup: (midi != prev_midi) | (frame_gap > 1)
   ↓
 BPM グリッドに量子化 (col = round(t / subdiv_sec))
   ↓
@@ -150,8 +156,10 @@ TabResult(...)
 ### `_estimate_bpm(y, sr, audio_path) -> float`
 
 同ディレクトリに `drums.wav` があれば drums.wav でBPM推定（最精度）。
-なければ複数の `start_bpm` 候補で beat_track を走らせ、onset強度スコアが
-最大の候補を採用する。
+なければ `onset_strength` を **1回だけ計算**し、6つの `start_bpm` 候補で
+`beat_track(onset_envelope=onset_env, ...)` を実行して onset 強度スコアが
+最大の候補を採用する。（旧実装では `beat_track(y=y, ...)` を6回呼び出し、
+`onset_strength` が内部で6回再計算されていた問題を修正）
 
 ### `_mono_filter(notes, window_sec) -> List`
 
@@ -188,3 +196,5 @@ TabResult(...)
 | 2026-04-27 | ブラッシュアップ: bassチューニング修正, fmin追加, MIDI音域フィルタ, 適応的mag閾値, SUBDIVISIONS=4, MEASURES_PER_LINE=2 |
 | 2026-04-27 | `_render_tab()` スロット幅を 3 文字固定幅に変更 |
 | 2025-07-xx | ベースTAB精度改善: `_estimate_bpm`(drums.wav優先), `_mono_filter`(ポリフォニー解消), `_choose_string` に bass用 E/A 弦バイアス追加, `_MIDI_RANGE["bass"]`=(28,55) に絞り込み |
+| 2026-04-28 | 性能改善: `_estimate_bpm()` の `onset_strength` 再計算を排除（`onset_envelope=` を明示渡し）。フレームループを numpy ベクトル演算に全置換（`magnitudes.argmax(axis=0)` で全フレーム一括処理、dedup も `np.diff` で実現）。`librosa.load()` を `_audio_cache.load()` に変更して chord_analyzer との音声キャッシュ共有を実現 |
+| 2026-05-13 | `analyze(audio_path, ...)` → `analyze(source: Union[str, AnalysisSession], ...)` に変更。`_audio_cache.load()` + `hpss` + `_estimate_bpm()` を `AnalysisSession.audio_native` / `.hpss_native` / `.bpm` に置換し、全モジュール間でゼロコスト共有を実現 |

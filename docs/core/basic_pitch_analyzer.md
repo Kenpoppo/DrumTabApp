@@ -48,7 +48,7 @@ Spotify「Basic Pitch」ニューラルネットワークを用いた高精度�
 ## 4. 処理フロー
 
 ```
-librosa.load(sr=None, mono=True, float32)
+_audio_cache.load(sr=None, mono=True, float32)   → y  ※chord_analyzer とキャッシュ共有
   ↓
 _estimate_bpm(y, sr, audio_path)
   → drums.wav が同ディレクトリにあれば drums.wav でBPM推定
@@ -135,3 +135,5 @@ Spleeter の bass.wav では低域の基音エネルギーが失われ、2nd har
 | 2025-07-xx | ベースTAB精度改善: `_BP_PARAMS` 楽器別デフォルト追加, `_correct_bass_octaves()` 実装 (Spleeter倍音補正), BPM推定を drums.wav 優先方式に変更, `_mono_filter` 適用 |
 | 2025-07-xx | BPM連動 minimum_note_length (× 0.83係数) 追加, `_mono_filter` window を BPM連動 (subdiv × 0.5) に変更, velocity は常に0のためフィルタ無効化 |
 | 2025-07-xx | `_merge_sustained_notes(gap_ms=100)` 追加: D2/D3 の持続音再分割を統合; `_dedup_runs(beat_sec/2)` 追加: 倍音補正後の重複除去; `_correct_bass_octaves` ratio_threshold 0.15→0.12 で補正を積極化; post-correction MIDI cap (m≤48) 追加; minimum_frequency=30Hz でモデルコンテキスト拡張; bass onset/frame 閾値 0.35/0.25→0.25/0.18 で G1/Bb1 recall 向上 |
+| 2026-04-28 | 性能改善: `librosa.load()` を `_audio_cache.load()` に変更。chord_analyzer と同一 (path, sr=None) の音声を共有してロードを排除 |
+| 2026-05-13 | `analyze(audio_path, ...)` → `analyze(source: Union[str, AnalysisSession], ...)` に変更。`_audio_cache.load()` + `_estimate_bpm()` を `AnalysisSession.audio_native` / `.bpm` に置換。`audio_path = source.path` で `basic_pitch.predict()` に渡す |

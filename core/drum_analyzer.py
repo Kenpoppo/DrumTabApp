@@ -14,15 +14,23 @@ attack_time_analysis.py / drum_sheet_generator.py / (旧)drum_analyzer.py
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import TYPE_CHECKING, Any, List, Optional, Union
 
 import numpy as np
 import librosa
+
+if TYPE_CHECKING:
+    from core.analysis_session import AnalysisSession
 
 # ── 共通定数 ──────────────────────────────────────────────────────────────────
 SR         = 22_050   # リサンプリング後のサンプリングレート
 HOP_LENGTH = 512
 N_FFT      = 2_048
+
+# モジュール初期化時に1回だけ計算（per-onset 計算を排除）
+_FREQS_DRUM = np.fft.rfftfreq(N_FFT, d=1.0 / SR)   # (N_FFT//2+1,)
+_LO_MASK    = (_FREQS_DRUM >= 20.0)  & (_FREQS_DRUM < 200.0)
+_HI_MASK    = _FREQS_DRUM >= 5_000.0
 
 
 # ── データモデル ───────────────────────────────────────────────────────────────
@@ -60,87 +68,82 @@ class DrumAnalysisResult:
 
 
 # ── 内部ヘルパー ───────────────────────────────────────────────────────────────
-def _band_power(power: np.ndarray, freqs: np.ndarray, lo: float, hi: float) -> float:
-    mask = (freqs >= lo) & (freqs < hi)
-    return float(power[mask].sum())
-
-
-def _classify_hit(y: np.ndarray, sr: int, frame: int, hop: int) -> str:
+def _classify_hits_batch(
+    S: np.ndarray,
+    onset_frames: np.ndarray,
+) -> list:
     """
-    1 オンセットを Kick / Snare / Hi-Hat に分類する。
+    STFT パワースペクトル S から全オンセットを一括で Kick/Snare/Hi-Hat に分類する。
 
-    実データ診断に基づく閾値設計（金木犀 feat.Ado 解析結果より）:
-      - centroid median=367 Hz, 76% が < 1500 Hz → Kick は低重心が支配的
-      - Hi-Hat: centroid > 5000 Hz が最も信頼性の高い指標
-      - Snare : 中間帯（1500-5000 Hz）でかつ低域比率が低いもの
+    旧 _classify_hit() を per-onset FFT ループから numpy ベクトル演算に置き換え。
+    特徴量はモジュール定数の _FREQS_DRUM / _LO_MASK / _HI_MASK を流用する。
 
-    特徴量:
-      1. spectral_centroid : スペクトル重心 [Hz] — 主判定
-      2. low_r             : 20-200 Hz エネルギー比 — Kick 補助判定
-      3. high_r            : 5 kHz+ エネルギー比   — Hi-Hat 補助判定
+    S shape: (freq_bins, n_frames)  — librosa.stft の |magnitude|^2
+    onset_frames: 各オンセットのフレームインデックス
     """
-    center = frame * hop
-    window = y[max(0, center - hop): center + hop]
-    if len(window) < 64:
-        return "Unknown"
+    frames = np.clip(onset_frames, 0, S.shape[1] - 1)
 
-    # 無音ウィンドウはスキップ（RMS が極小の場合）
-    if float(np.sqrt(np.mean(window ** 2))) < 1e-4:
-        return "Unknown"
+    # 全オンセットのパワー行列: (freq_bins, n_onsets)
+    powers = S[:, frames]
+    total  = powers.sum(axis=0) + 1e-10          # (n_onsets,)
 
-    power = np.abs(np.fft.rfft(window, n=N_FFT)) ** 2
-    freqs = np.fft.rfftfreq(N_FFT, d=1.0 / sr)
-    total = power.sum() + 1e-10
+    # 無音判定: パーセバルの定理より total/N_FFT ≈ mean(x^2)
+    rms_proxy = np.sqrt(total / N_FFT)
+    silent    = rms_proxy < 1e-4
 
-    centroid = float((freqs * power).sum() / total)
-    low_r    = _band_power(power, freqs, 20.0,    200.0)  / total
-    high_r   = _band_power(power, freqs, 5_000.0, sr / 2.0) / total
+    # 3 特徴量を一括計算
+    centroid = (_FREQS_DRUM[:, None] * powers).sum(axis=0) / total  # (n_onsets,)
+    low_r    = powers[_LO_MASK].sum(axis=0) / total                 # (n_onsets,)
+    high_r   = powers[_HI_MASK].sum(axis=0) / total                 # (n_onsets,)
 
-    # 判定ルール（優先度順）
-    # Hi-Hat: 重心が 5 kHz を超えれば確定。高域比率が十分なら 4 kHz でも判定
-    if centroid > 5_000 or (centroid > 4_000 and high_r > 0.20):
-        return "Hi-Hat"
-    # Kick: 重心が 1500 Hz 未満なら確定。中域重心でも低域比率が高ければ Kick
-    if centroid < 1_500 or (centroid < 2_500 and low_r > 0.45):
-        return "Kick"
-    return "Snare"
+    # 分類ルール（優先度順・ベクトル演算）
+    is_hihat = (centroid > 5_000) | ((centroid > 4_000) & (high_r > 0.20))
+    is_kick  = ~is_hihat & ((centroid < 1_500) | ((centroid < 2_500) & (low_r > 0.45)))
+
+    labels = np.where(silent, "Unknown",
+             np.where(is_hihat, "Hi-Hat",
+             np.where(is_kick,  "Kick", "Snare")))
+    return labels.tolist()
 
 
 # ── 公開 API ───────────────────────────────────────────────────────────────────
-def analyze(audio_path: str) -> DrumAnalysisResult:
+def analyze(source: Union[str, AnalysisSession]) -> DrumAnalysisResult:
     """
     音源ファイルを解析して DrumAnalysisResult を返す。
 
+    source には str (ファイルパス) または AnalysisSession を渡せる。
+    AnalysisSession を渡すと audio/HPSS/BPM を他モジュールと共有してゼロコストで再利用する。
+
     処理フロー:
-      1. librosa.load  → モノラル float32 に統一
-      2. HPSS          → パーカッシブ成分のみ抽出（オンセット検出精度向上）
-      3. beat_track    → BPM 推定
-      4. onset_detect  → パーカッシブ成分上でオンセット検出
-      5. _classify_hit → 元の信号（フル帯域）でドラム種別を分類
+      1. audio_22k / hpss_22k / bpm  → AnalysisSession（joblib ディスクキャッシュ）から取得
+      2. onset_detect  → パーカッシブ成分上でオンセット検出
+      3. _classify_hits_batch → STFT 一括でドラム種別を分類
     """
-    y, sr = librosa.load(audio_path, sr=SR, mono=True, dtype=np.float32)
+    if isinstance(source, str):
+        from core.analysis_session import AnalysisSession as _AS
+        source = _AS(source)
 
-    # HPSS: パーカッシブ成分でオンセット検出 → ノイズによる誤検出を抑制
-    _, y_perc = librosa.effects.hpss(y, margin=3.0)
-
-    # BPM
-    tempo, _ = librosa.beat.beat_track(y=y_perc, sr=sr, hop_length=HOP_LENGTH)
-    bpm = float(np.atleast_1d(tempo)[0])
+    y, sr     = source.audio_22k    # 22050 Hz (ドラム解析用固定 SR)
+    _, y_perc = source.hpss_22k    # パーカッシブ成分
+    bpm       = source.bpm         # 全モジュール共通 BPM
 
     # オンセット検出（パーカッシブ成分で実施）
+    onset_env_perc = librosa.onset.onset_strength(y=y_perc, sr=sr, hop_length=HOP_LENGTH)
     onset_frames = librosa.onset.onset_detect(
-        y=y_perc, sr=sr, hop_length=HOP_LENGTH,
+        onset_envelope=onset_env_perc, sr=sr, hop_length=HOP_LENGTH,
         units="frames", backtrack=True,
         pre_max=3, post_max=3, pre_avg=5, post_avg=5,
-        delta=0.05,  # 0.07 → 0.05: 弱いHi-Hatオンセットを捉えるため感度向上
-        wait=5,      # 0.07 → 5: 16分音符Hi-Hat間隔(~5.4 frames@123BPM)を検出
+        delta=0.05,
+        wait=5,
     )
     onset_times = librosa.frames_to_time(onset_frames, sr=sr, hop_length=HOP_LENGTH)
 
-    # 分類は元信号（フル帯域）で行う → 周波数特性を正確に反映
+    # 元信号の STFT を1回だけ計算して全オンセットを一括分類
+    S = np.abs(librosa.stft(y, n_fft=N_FFT, hop_length=HOP_LENGTH)) ** 2
+    hit_labels = _classify_hits_batch(S, onset_frames)
     hits = [
-        DrumHit(time=float(t), label=_classify_hit(y, sr, int(f), HOP_LENGTH))
-        for t, f in zip(onset_times, onset_frames)
+        DrumHit(time=float(t), label=lb)
+        for t, lb in zip(onset_times, hit_labels)
     ]
 
     # サマリー統計量

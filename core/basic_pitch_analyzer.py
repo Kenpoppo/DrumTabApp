@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import os
 import warnings
-from typing import List, Optional, Tuple
+from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 
 import librosa
 import numpy as np
@@ -38,9 +38,11 @@ from core.pitch_analyzer import (
     _COLS_PER_MEASURE,
     _SUBDIVISIONS,
     _render_tab,
-    _estimate_bpm,
     _mono_filter,
 )
+
+if TYPE_CHECKING:
+    from core.analysis_session import AnalysisSession
 
 # TensorFlow の INFO ログを抑制
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
@@ -183,7 +185,7 @@ def _correct_bass_octaves(
 
 # ── 公開 API ───────────────────────────────────────────────────────────────────
 def analyze(
-    audio_path:  str,
+    source:      Union[str, AnalysisSession],
     instrument:  str,
     chords:      Optional[List[str]] = None,
     key:         str = "",
@@ -194,8 +196,11 @@ def analyze(
     """
     basic-pitch ニューラルネットワークで高精度ピッチ検出 → TAB 生成。
 
+    source には str (ファイルパス) または AnalysisSession を渡せる。
+    AnalysisSession を渡すと audio/BPM を他モジュールと共有してゼロコストで再利用する。
+
     引数:
-        audio_path:           解析対象ファイルパス (.mp3/.wav/.flac/.m4a等)
+        source:               解析対象ファイルパス または AnalysisSession
         instrument:           "guitar" または "bass"
         chords:               小節別コードリスト (省略可)
         key:                  キー文字列 (省略可)
@@ -228,9 +233,13 @@ def analyze(
     ot = onset_threshold   if onset_threshold   is not None else defaults["onset_threshold"]
     ft = frame_threshold   if frame_threshold   is not None else defaults["frame_threshold"]
 
-    # BPM は既存の librosa で取得（beat_track は basic-pitch 非依存）
-    y, sr = librosa.load(audio_path, sr=None, mono=True, dtype=np.float32)
-    bpm = _estimate_bpm(y, sr, audio_path=audio_path)
+    if isinstance(source, str):
+        from core.analysis_session import AnalysisSession as _AS
+        source = _AS(source)
+
+    audio_path = source.path          # basic_pitch.predict() はファイルパスを要求
+    y, sr      = source.audio_native  # BPM 推定 / _correct_bass_octaves に使用
+    bpm        = source.bpm           # 全モジュール共通 BPM（drums.wav 優先）
 
     # BPM 連動 minimum_note_length: 16分音符の83%を最小単位とする
     # (BPM=123時: 0.83×121≈100ms / フル16分より短いと_correct_bass_octavesの補正源音符が失われる)

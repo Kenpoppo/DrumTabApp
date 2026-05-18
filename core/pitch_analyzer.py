@@ -13,11 +13,14 @@ core/pitch_analyzer.py
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 import os
 
 import numpy as np
 import librosa
+
+if TYPE_CHECKING:
+    from core.analysis_session import AnalysisSession
 
 # ── 定数 ──────────────────────────────────────────────────────────────────────
 _MAG_THRESHOLD = 8.0    # piptrack マグニチュード閾値のフォールバック値
@@ -67,31 +70,32 @@ class TabResult:
 
 
 # ── 公開 API ───────────────────────────────────────────────────────────────────
-def analyze(audio_path: str, instrument: str,
+def analyze(source: Union[str, AnalysisSession], instrument: str,
             chords: Optional[List[str]] = None,
             key: str = "") -> TabResult:
     """
     音源を解析してビートアライン TAB を生成する。
 
+    source には str (ファイルパス) または AnalysisSession を渡せる。
+    AnalysisSession を渡すと audio/HPSS/BPM を他モジュールと共有してゼロコストで再利用する。
+
     処理フロー:
-      1. librosa.load    → モノラル
-      2. HPSS            → 倍音成分（ハーモニック）のみ抽出
-      3. beat_track      → BPM / ビートグリッド取得
-      4. piptrack        → 倍音成分上でフレーム毎ピッチ検出
-      5. 閾値 + dedup    → ノイズ / 連続同一音のフィルタ
-      6. 量子化          → BPM グリッドに最近傍スナップ
-      7. _render_tab     → 小節単位の TAB テキスト生成
+      1. audio_native / hpss_native / bpm → AnalysisSession から取得（joblib キャッシュ）
+      2. piptrack     → 倍音成分上でフレーム毎ピッチ検出
+      3. 閾値 + dedup → ノイズ / 連続同一音のフィルタ
+      4. 量子化       → BPM グリッドに最近傍スナップ
+      5. _render_tab  → 小節単位の TAB テキスト生成
     """
     if instrument not in _TUNINGS:
         raise ValueError(f"未対応の楽器です: {instrument}  (guitar / bass のみ対応)")
 
-    y, sr = librosa.load(audio_path, sr=None, mono=True, dtype=np.float32)
+    if isinstance(source, str):
+        from core.analysis_session import AnalysisSession as _AS
+        source = _AS(source)
 
-    # HPSS: 倍音成分でピッチ検出 → ドラムや打音によるピッチ誤検出を抑制
-    y_harm, _ = librosa.effects.hpss(y, margin=3.0)
-
-    # BPM 推定: 複数の start_bpm で候補を出し onset 相関が最大のものを採用
-    bpm = _estimate_bpm(y, sr, audio_path=audio_path)
+    y, sr    = source.audio_native
+    y_harm, _ = source.hpss_native  # 倍音成分（ハーモニック）
+    bpm      = source.bpm
 
     # ピッチ検出（倍音成分で実施）
     hop_length = 512
@@ -101,7 +105,6 @@ def analyze(audio_path: str, instrument: str,
     )
 
     # 適応的マグニチュード閾値: 非ゼロ値の上位 20% のみを有効とする
-    # 音源レベルに依らず安定した検出を保証（固定値 8.0 は音源によって不適切になる）
     mag_flat = magnitudes[magnitudes > 0]
     mag_threshold = (
         float(np.percentile(mag_flat, 80)) if len(mag_flat) > 0 else _MAG_THRESHOLD
@@ -109,30 +112,34 @@ def analyze(audio_path: str, instrument: str,
 
     midi_min, midi_max = _MIDI_RANGE[instrument]
 
-    # フレームごとに最大マグニチュードのビンを採用 + 閾値フィルタ + 連続 dedup
-    timed_notes: List[Tuple[float, int]] = []   # (time_sec, midi_note)
-    prev_midi: Optional[int] = None
-    for t in range(pitches.shape[1]):
-        mag_idx = int(magnitudes[:, t].argmax())
-        mag     = magnitudes[mag_idx, t]
-        pitch   = pitches[mag_idx, t]
+    # ── ベクトル化フレーム処理 ────────────────────────────────────────────────
+    # 各フレームで最大マグニチュードのビンを選択（Python ループを排除）
+    frame_idxs = np.arange(pitches.shape[1])
+    best_bin   = magnitudes.argmax(axis=0)               # (n_frames,)
+    max_mag    = magnitudes[best_bin, frame_idxs]        # (n_frames,)
+    max_pitch  = pitches[best_bin, frame_idxs]           # (n_frames,)
 
-        if mag < mag_threshold or pitch <= 0.0:
-            prev_midi = None   # 無音区間でリセット
-            continue
+    # 有効フレームのマスク（無音 / ゼロピッチ を除外）
+    valid = (max_mag >= mag_threshold) & (max_pitch > 0.0)
+    v_idx   = frame_idxs[valid]
+    v_pitch = max_pitch[valid]
 
-        midi = int(round(librosa.hz_to_midi(pitch)))
+    # MIDI 変換 + 音域フィルタ
+    v_midi = np.round(librosa.hz_to_midi(v_pitch)).astype(int)
+    in_range = (v_midi >= midi_min) & (v_midi <= midi_max)
+    v_idx  = v_idx[in_range]
+    v_midi = v_midi[in_range]
 
-        # 楽器音域外（倍音・ノイズ誤検出）を除去
-        if midi < midi_min or midi > midi_max:
-            prev_midi = None
-            continue
-
-        if midi == prev_midi:
-            continue   # 連続同一音は 1 回だけ記録
-
-        timed_notes.append((t * hop_length / sr, midi))
-        prev_midi = midi
+    # 連続同一音 dedup（無音ギャップがあれば同音でも保持）
+    # gaps[i] > 1 → フレームが連続していない（無音区間あり）→ prev_midi をリセット
+    timed_notes: List[Tuple[float, int]] = []
+    if len(v_midi) > 0:
+        gaps       = np.diff(v_idx, prepend=v_idx[0] - 2)   # 先頭は必ず保持
+        prev_midis = np.concatenate([[v_midi[0] - 1], v_midi[:-1]])
+        keep = (v_midi != prev_midis) | (gaps > 1)
+        v_times = v_idx[keep].astype(float) * hop_length / sr
+        v_midi_kept = v_midi[keep]
+        timed_notes = list(zip(v_times.tolist(), v_midi_kept.tolist()))
 
     if not timed_notes:
         return TabResult(
@@ -165,8 +172,11 @@ def _estimate_bpm(y: np.ndarray, sr: int, audio_path: str = "") -> float:
     優先順位:
       1. 同ディレクトリに drums.wav があればそれで推定（最も安定）
       2. 渡された y（ベース/ギターステム）で推定
-         複数の start_bpm で beat_track を実行し、平均ビート強度が最高の BPM を選択。
+         onset_strength を1回だけ計算し、複数の start_bpm で beat_track を
+         実行して平均ビート強度が最高の BPM を選択する。
     """
+    _HOP = 512  # librosa のデフォルト hop_length と統一
+
     # ── drums.wav 優先パス ─────────────────────────────────────────────────
     if audio_path:
         drums_path = os.path.join(os.path.dirname(audio_path), "drums.wav")
@@ -181,16 +191,17 @@ def _estimate_bpm(y: np.ndarray, sr: int, audio_path: str = "") -> float:
                 pass  # フォールバックへ
 
     # ── ステム単体での推定（フォールバック） ──────────────────────────────
-    onset_env = librosa.onset.onset_strength(y=y, sr=sr)
+    # onset_strength を1回だけ計算し beat_track に渡す（6回の再計算を排除）
+    onset_env = librosa.onset.onset_strength(y=y, sr=sr, hop_length=_HOP)
     candidates: List[Tuple[float, float]] = []  # (bpm, score)
     for start in _BPM_CANDIDATES:
         t, beats = librosa.beat.beat_track(
-            y=y, sr=sr, start_bpm=float(start)
+            onset_envelope=onset_env, sr=sr, hop_length=_HOP,
+            start_bpm=float(start),
         )
         bpm_cand = float(np.atleast_1d(t)[0])
         if not (_BPM_MIN <= bpm_cand <= _BPM_MAX) or len(beats) == 0:
             continue
-        # 平均ビート強度 (onset合計 / ビート数) → ビート数に依らず比較可能
         score = float(onset_env[beats].mean())
         candidates.append((bpm_cand, score))
 

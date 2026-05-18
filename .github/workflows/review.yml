@@ -1,0 +1,45 @@
+name: Claude Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  issue_comment:
+    types: [created]
+
+jobs:
+  claude-review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    # PR イベント、または PR コメントで @claude に言及した場合に実行
+    if: |
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.pull_request != null &&
+       contains(github.event.comment.body, '@claude'))
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: anthropics/claude-code-action@beta
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          direct_prompt: |
+            このPull Requestのコード変更をレビューしてください。
+
+            以下の観点でチェックしてください:
+            1. バグや論理エラー（特に AnalysisSession のスレッド安全性）
+            2. セキュリティ上の問題
+            3. パフォーマンスの問題（librosa / numpy の使い方）
+            4. コードの品質・可読性
+            5. docs/ 仕様書との整合性（core/ モジュール変更時は対応する docs/ も更新されているか）
+
+            DrumTabApp の設計原則（違反がないか確認）:
+            - ui/ → core/ 方向の依存のみ許可（core/ から ui/ への import 禁止）
+            - core/ 内クロス依存: analysis_session / _audio_cache のみ他モジュールから参照可
+            - core/ モジュールに PyQt5 などの UI ライブラリを import しない
+            - analyze() は Union[str, AnalysisSession] を受け付ける（後方互換）
+
+            レビュー結果は日本語で記述し、問題がなければその旨も明記してください。

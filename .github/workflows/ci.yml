@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "feature/**", "fix/**"]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.9", "3.11"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements-ci.txt
+
+      - name: Install CI dependencies
+        run: pip install -r requirements-ci.txt
+
+      - name: Run tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m pytest tests/ -v --tb=short
+
+      - name: Check for syntax errors in core/
+        run: python -m py_compile core/analysis_session.py core/drum_analyzer.py core/pitch_analyzer.py core/basic_pitch_analyzer.py core/chord_analyzer.py core/_audio_cache.py

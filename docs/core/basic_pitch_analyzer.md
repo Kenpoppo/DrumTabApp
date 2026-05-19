@@ -13,11 +13,11 @@ Spotify「Basic Pitch」ニューラルネットワークを用いた高精度�
 
 ## 2. 公開 API
 
-### `analyze(audio_path, instrument, chords, key, onset_threshold, frame_threshold, minimum_note_length) -> TabResult`
+### `analyze(source, instrument, chords, key, onset_threshold, frame_threshold, minimum_note_length) -> TabResult`
 
 | 引数 | 型 | デフォルト | 説明 |
 |---|---|---|---|
-| `audio_path` | `str` | — | 解析対象ファイルパス (.mp3/.wav/.flac/.m4a等) |
+| `source` | `str` または `AnalysisSession` | — | 解析対象ファイルパス (.mp3/.wav/.flac/.m4a等)、または共有セッション |
 | `instrument` | `str` | — | `"guitar"` または `"bass"` |
 | `chords` | `list[str] \| None` | `None` | 小節別コードリスト（省略可） |
 | `key` | `str` | `""` | キー文字列（省略可） |
@@ -137,3 +137,4 @@ Spleeter の bass.wav では低域の基音エネルギーが失われ、2nd har
 | 2025-07-xx | `_merge_sustained_notes(gap_ms=100)` 追加: D2/D3 の持続音再分割を統合; `_dedup_runs(beat_sec/2)` 追加: 倍音補正後の重複除去; `_correct_bass_octaves` ratio_threshold 0.15→0.12 で補正を積極化; post-correction MIDI cap (m≤48) 追加; minimum_frequency=30Hz でモデルコンテキスト拡張; bass onset/frame 閾値 0.35/0.25→0.25/0.18 で G1/Bb1 recall 向上 |
 | 2026-04-28 | 性能改善: `librosa.load()` を `_audio_cache.load()` に変更。chord_analyzer と同一 (path, sr=None) の音声を共有してロードを排除 |
 | 2026-05-13 | `analyze(audio_path, ...)` → `analyze(source: Union[str, AnalysisSession], ...)` に変更。`_audio_cache.load()` + `_estimate_bpm()` を `AnalysisSession.audio_native` / `.bpm` に置換。`audio_path = source.path` で `basic_pitch.predict()` に渡す |
+| 2026-05-19 | API ドキュメント修正: 第1引数を `audio_path: str` → `source: Union[str, AnalysisSession]` に更新（ドキュメント漏れを修正） |

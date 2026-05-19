@@ -23,6 +23,7 @@ DrumTabApp/
 │   ├── pitch_analyzer.py         # ギター / ベース TAB 生成 (piptrack DSP)
 │   ├── basic_pitch_analyzer.py   # ギター / ベース TAB 生成 (basic-pitch NN)
 │   ├── chord_analyzer.py         # キー検出・コード進行解析
+│   ├── player.py                 # オーディオプレイヤー（速度変更・ピッチシフト・A-B ループ）
 │   ├── midi_exporter.py          # MIDI (.mid) エクスポート
 │   ├── gp5_exporter.py           # Guitar Pro (.gp5) エクスポート
 │   └── exporter.py               # PDF 出力
@@ -30,6 +31,10 @@ DrumTabApp/
 │   ├── __init__.py
 │   └── main_window.py            # PyQt5 メインウィンドウ
 ├── main.py                       # エントリポイント
+├── requirements.txt              # 全依存パッケージ
+├── requirements-ci.txt           # CI 用軽量依存（PyQt5/tensorflow 除外）
+├── tests/                        # ユニットテスト
+│   └── test_core.py              # core/ モジュールのテスト（23 ケース）
 ├── docs/                         # 設計ドキュメント（本ファイル含む）
 │   ├── architecture.md           # ← 本ファイル
 │   ├── core/
@@ -37,12 +42,17 @@ DrumTabApp/
 │   │   ├── drum_analyzer.md
 │   │   ├── pitch_analyzer.md
 │   │   ├── basic_pitch_analyzer.md
+│   │   ├── chord_analyzer.md
+│   │   ├── player.md
 │   │   ├── gp5_exporter.md
 │   │   └── exporter.md
 │   └── ui/
 │       └── main_window.md
 └── .github/
-    └── copilot-instructions.md   # Copilot 自動読み込み指示
+    ├── copilot-instructions.md   # Copilot 自動読み込み指示
+    └── workflows/
+        ├── ci.yml                # push/PR 時の自動テスト (Python 3.9 / 3.11)
+        └── review.yml            # PR 時の Claude 自動コードレビュー
 ```
 
 ### 旧ファイル（削除不可・修正不可）
@@ -62,6 +72,7 @@ DrumTabApp/
 ```text
 [main.py]
     └── ui/main_window.py
+            ├── core/player.py         (AudioPlayer + make_click_sound)
             ├── core/_audio_cache.py   (ファイル切替時にキャッシュクリア)
             ├── core/drum_analyzer.py
             ├── core/pitch_analyzer.py
@@ -74,7 +85,7 @@ DrumTabApp/
 
 - `ui/ → core/` のみ許可
 - `core/ → ui/` 禁止
-- `core/` 内クロス依存: `analysis_session` / `_audio_cache` は `chord_analyzer` / `pitch_analyzer` / `basic_pitch_analyzer` / `drum_analyzer` から参照可。それ以外は禁止
+- `core/` 内クロス依存: `analysis_session` / `_audio_cache` は `chord_analyzer` / `pitch_analyzer` / `basic_pitch_analyzer` / `drum_analyzer` から参照可。`player` は他の `core/` モジュールに依存しない。それ以外の相互依存は禁止
 
 ---
 
@@ -179,7 +190,30 @@ AnalysisSession.bpm          → BPM（drums.wav 優先）
 
 ---
 
-## 7. 変更履歴
+## 8. テスト・CI パイプライン
+
+### ユニットテスト
+
+`tests/test_core.py` に 23 テストケース。PyQt5 / tensorflow に依存しない `core/` のみをテスト。
+
+```bash
+QT_QPA_PLATFORM=offscreen python -m pytest tests/ -v
+```
+
+依存: `requirements-ci.txt`（PyQt5・tensorflow・basic-pitch 除外の軽量セット）
+
+### GitHub Actions
+
+| ワークフロー | トリガー | 内容 |
+|---|---|---|
+| `ci.yml` | push / PR | Python 3.9 & 3.11 で pytest 実行 + py_compile チェック |
+| `review.yml` | PR open / sync / `@claude` コメント | Claude が PR の差分を解析して日本語レビューを投稿 |
+
+`review.yml` の実行には GitHub Secrets に `ANTHROPIC_API_KEY` の登録が必要。
+
+---
+
+## 9. 変更履歴
 
 | 日付 | 変更内容 |
 | --- | --- |
@@ -187,3 +221,4 @@ AnalysisSession.bpm          → BPM（drums.wav 優先）
 | 2025-07-xx | ベースTAB精度改善: basic_pitch_analyzer に `_correct_bass_octaves` 追加、`_estimate_bpm` (drums.wav優先)・`_mono_filter`・`_choose_string` bass拡張を pitch_analyzer に追加 |
 | 2026-04-28 | 性能改善: `core/_audio_cache.py` 追加（スレッドセーフ LRU キャッシュ）。ドラム分類を per-onset FFT → STFT 一括に変更。`_estimate_bpm` の onset_strength 再計算を排除。piptrack フレームループを numpy ベクトル演算に置換。コード/キー検出を行列積に一括化 |
 | 2026-05-13 | `core/analysis_session.py` 追加（Lazy Eval + joblib ディスクキャッシュ）。全 analyzer が `analyze(source: Union[str, AnalysisSession])` を受け付けるよう変更。`ui/main_window.py` に「全解析」ボタン追加 — 1 session で 4 analyzer を連鎖実行し、audio/HPSS/BPM の重複計算を完全排除 |
+| 2026-05-19 | `core/player.py` をパッケージ構成に追記（ドキュメント漏れ修正）。`docs/core/chord_analyzer.md` / `docs/core/player.md` を新規作成。`requirements-ci.txt` / `tests/` / `.github/workflows/` を追加し CI セクションを新設。依存方向に `player.py` を追記 |

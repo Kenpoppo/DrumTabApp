@@ -34,9 +34,15 @@
 
 ---
 
-### `to_text(result: DrumAnalysisResult) -> str`
+### `to_text(result: DrumAnalysisResult, chords: List[str] | None = None, key: str = "") -> str`
 
 `DrumAnalysisResult` を**ドラムタブ譜テキスト**に変換する。
+
+| 引数 | 型 | デフォルト | 説明 |
+|---|---|---|---|
+| `result` | `DrumAnalysisResult` | — | `analyze()` の戻り値 |
+| `chords` | `list[str] \| None` | `None` | 小節別コードリスト（`chord_analyzer.analyze()` の `chord_per_measure`） |
+| `key` | `str` | `""` | キー文字列（例: `"A Minor"`）。コードヘッダ行に付記される |
 
 出力形式（16 分音符グリッド）:
 - 各列 = 16 分音符 1 つ
@@ -167,3 +173,4 @@ STFT パワースペクトル `S` から全オンセットを **numpy ベクト�
 | 2026-04-27 | `to_text()` をサマリーテキストからドラムタブ譜形式（16分音符グリッド、HH/SN/BD行）に全面書き換え |
 | 2026-04-28 | 性能改善: `onset_strength` を1回だけ計算し `beat_track` / `onset_detect` 両方に渡すよう変更。`_classify_hit()` を廃止し `_classify_hits_batch()` に置換（per-onset FFT ループ → STFT 1 回 + numpy 一括分類）。`_FREQS_DRUM` / `_LO_MASK` / `_HI_MASK` をモジュール定数として初期化時に1回だけ計算 |
 | 2026-05-13 | `analyze(audio_path: str)` → `analyze(source: Union[str, AnalysisSession])` に変更。`librosa.load` + `hpss` + `beat_track` を `AnalysisSession.audio_22k` / `.hpss_22k` / `.bpm` で代替し、全モジュール間でゼロコスト共有を実現 |
+| 2026-05-19 | `to_text()` に `chords: List[str] \| None` / `key: str` オプショナルパラメータを追記（実装は既存。ドキュメント漏れを修正） |
